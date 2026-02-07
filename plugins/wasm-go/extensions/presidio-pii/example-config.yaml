@@ -1,0 +1,67 @@
+analyzerServiceName: presidio-analyzer.dns
+analyzerServicePort: 8080
+analyzerServiceHost: presidio-analyzer.example.com
+analyzerPath: "/analyze"
+
+anonymizerServiceName: presidio-anonymizer.dns
+anonymizerServicePort: 8080
+anonymizerServiceHost: presidio-anonymizer.example.com
+anonymizerPath: "/anonymize"
+
+# 如果使用 IP 地址（固定地址类型服务），请使用以下配置：
+# analyzerServiceName: presidio-analyzer.static
+# analyzerServicePort: 80
+# analyzerServiceHost: 192.168.1.100
+# analyzerPath: "/analyze"
+#
+# anonymizerServiceName: presidio-anonymizer.static
+# anonymizerServicePort: 80
+# anonymizerServiceHost: 192.168.1.101
+# anonymizerPath: "/anonymize"
+
+checkRequest: true
+checkResponse: true
+filterScope: both
+language: zh
+defaultAction: MASK
+defaultScoreThreshold: 0.85
+anonymizer: hash
+denyCode: 200
+denyMessage: "很抱歉，内容包含敏感信息"
+protocol: openai
+timeout: 2000
+bufferLimit: 1000
+entities:
+  - entityType: PERSON
+    action: MASK
+    scoreThreshold: 0.85
+  - entityType: EMAIL_ADDRESS
+    action: MASK
+    scoreThreshold: 0.90
+  - entityType: PHONE_NUMBER
+    action: MASK
+    scoreThreshold: 0.80
+  - entityType: CREDIT_CARD
+    action: BLOCK
+    scoreThreshold: 0.95
+  - entityType: IBAN_CODE
+    action: MASK
+    scoreThreshold: 0.90
+  - entityType: IP_ADDRESS
+    action: MASK
+    scoreThreshold: 0.95
+  - entityType: URL
+    action: MASK
+    scoreThreshold: 0.85
+  - entityType: US_SSN
+    action: BLOCK
+    scoreThreshold: 0.99
+  - entityType: UK_NHS
+    action: BLOCK
+    scoreThreshold: 0.99
+  - entityType: DATE_TIME
+    action: MASK
+    scoreThreshold: 0.75
+  - entityType: LOCATION
+    action: MASK
+    scoreThreshold: 0.80
