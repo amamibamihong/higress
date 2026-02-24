@@ -1,8 +1,12 @@
+# Presidio PII Wasm 插件示例配置
+# 支持 Presidio Analyzer API 返回的直接数组格式和 Anonymizer API 的 analyzer_results 字段
+
 analyzerServiceName: presidio-analyzer.dns
 analyzerServicePort: 8080
 analyzerServiceHost: presidio-analyzer.example.com
 analyzerPath: "/analyze"
 
+# 使用 Presidio Anonymizer 服务进行 PII 匿名化处理
 anonymizerServiceName: presidio-anonymizer.dns
 anonymizerServicePort: 8080
 anonymizerServiceHost: presidio-anonymizer.example.com
@@ -12,56 +16,158 @@ anonymizerPath: "/anonymize"
 # analyzerServiceName: presidio-analyzer.static
 # analyzerServicePort: 80
 # analyzerServiceHost: 192.168.1.100
-# analyzerPath: "/analyze"
 #
 # anonymizerServiceName: presidio-anonymizer.static
 # anonymizerServicePort: 80
 # anonymizerServiceHost: 192.168.1.101
-# anonymizerPath: "/anonymize"
 
+# 匹配范围：input（仅请求）、output（仅响应）、both（两者都检测）
 checkRequest: true
 checkResponse: true
 filterScope: both
+
+# 文本语言配置
 language: zh
+
+# 默认操作：MASK（掩码）、BLOCK（阻断）、NONE（忽略）
 defaultAction: MASK
+
+# 默认置信度阈值（0-1）
 defaultScoreThreshold: 0.85
-anonymizer: hash
+
+# 阻断响应配置
 denyCode: 200
 denyMessage: "很抱歉，内容包含敏感信息"
+
+# 协议：openai（OpenAI 兼容格式）、original（原始格式）
 protocol: openai
+
+# 超时设置（毫秒）
 timeout: 2000
+
+# 流式响应缓冲限制（单位：chunk 数量）
 bufferLimit: 1000
+
+# PII 实体类型配置
+# 每个 entityType 可以单独配置：
+# - action: 操作类型（MASK/BLOCK/NONE）
+# - scoreThreshold: 置信度阈值（0-1）
 entities:
+  # 个人姓名
   - entityType: PERSON
     action: MASK
     scoreThreshold: 0.85
+
+  # 邮箱地址
   - entityType: EMAIL_ADDRESS
     action: MASK
     scoreThreshold: 0.90
+
+  # 电话号码
   - entityType: PHONE_NUMBER
     action: MASK
     scoreThreshold: 0.80
+
+  # 信用卡号（高风险，直接阻断）
   - entityType: CREDIT_CARD
     action: BLOCK
     scoreThreshold: 0.95
+
+  # IBAN 银行账号
   - entityType: IBAN_CODE
     action: MASK
     scoreThreshold: 0.90
+
+  # IP 地址
   - entityType: IP_ADDRESS
     action: MASK
     scoreThreshold: 0.95
+
+  # URL
   - entityType: URL
     action: MASK
     scoreThreshold: 0.85
+
+  # 美国社会安全号码（高风险，直接阻断）
   - entityType: US_SSN
     action: BLOCK
     scoreThreshold: 0.99
+
+  # 英国 NHS 号码（高风险，直接阻断）
   - entityType: UK_NHS
     action: BLOCK
     scoreThreshold: 0.99
+
+  # 日期时间
   - entityType: DATE_TIME
     action: MASK
     scoreThreshold: 0.75
+
+  # 地理位置信息
   - entityType: LOCATION
     action: MASK
     scoreThreshold: 0.80
+
+  # 社交媒体账号
+  - entityType: USERNAME
+    action: MASK
+    scoreThreshold: 0.85
+
+  # 驾驶证号码
+  - entityType: US_DRIVER_LICENSE
+    action: BLOCK
+    scoreThreshold: 0.95
+
+  # 银行账号（一般）
+  - entityType: BANK_ACCOUNT
+    action: MASK
+    scoreThreshold: 0.90
+
+# 高级配置示例：
+#
+# 使用 replace 操作符自定义替换值：
+# entities:
+#   - entityType: EMAIL_ADDRESS
+#     action: MASK
+#     scoreThreshold: 0.90
+#     # 这里的 anonymizer 配置会覆盖全局的 anonymizer 设置
+#     anonymizer:
+#       type: replace
+#       new_value: "[邮箱已隐藏]"
+#
+# 使用 mask 操作符部分掩码电话号码：
+# entities:
+#   - entityType: PHONE_NUMBER
+#     action: MASK
+#     scoreThreshold: 0.80
+#     anonymizer:
+#       type: mask
+#       masking_char: "*"
+#       chars_to_mask: 4
+#       from_end: true    # 从末尾开始掩码
+#
+# 使用 redact 操作符完全删除 PII：
+# entities:
+#   - entityType: CREDIT_CARD
+#     action: MASK
+#     scoreThreshold: 0.95
+#     anonymizer:
+#       type: redact
+#
+# 使用 encrypt 操作符加密敏感数据：
+# entities:
+#   - entityType: BANK_ACCOUNT
+#     action: MASK
+#     scoreThreshold: 0.90
+#     anonymizer:
+#       type: encrypt
+#       key: "your-encryption-key"  # 注意：生产环境应使用安全的密钥管理方案
+#
+# 使用 hash 操作符（默认）：
+# entities:
+#   - entityType: PERSON
+#     action: MASK
+#     scoreThreshold: 0.85
+#     anonymizer:
+#       type: hash
+#       hash_type: sha256

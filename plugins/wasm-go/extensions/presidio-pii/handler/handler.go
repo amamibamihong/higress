@@ -15,13 +15,26 @@ import (
 	"github.com/higress-group/wasm-go/pkg/log"
 	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
+
+func getBoolContext(ctx wrapper.HttpContext, key string, defaultValue bool) bool {
+	if ctx.GetContext(key) == nil {
+		ctx.SetContext(key, defaultValue)
+		return defaultValue
+	}
+	if val, ok := ctx.GetContext(key).(bool); ok {
+		return val
+	}
+	ctx.SetContext(key, defaultValue)
+	return defaultValue
+}
 
 type PresidioHandler struct{}
 
 var Handler = &PresidioHandler{}
 
-func (h *PresidioHandler) generateRandomChatID() string {
+func (h *PresidioHandler) GenerateRandomChatID() string {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, 29)
 	for i := range b {
@@ -30,7 +43,7 @@ func (h *PresidioHandler) generateRandomChatID() string {
 	return "chatcmpl-" + string(b)
 }
 
-func (h *PresidioHandler) generateHexID(length int) (string, error) {
+func (h *PresidioHandler) GenerateHexID(length int) (string, error) {
 	b := make([]byte, length)
 	for i := range b {
 		b[i] = byte(rand.Intn(256))
@@ -51,7 +64,7 @@ func HandleRequestBody(ctx wrapper.HttpContext, config cfg.PresidioPIIConfig, bo
 		return types.ActionContinue
 	}
 
-	sessionID, _ := Handler.generateHexID(20)
+	sessionID, _ := Handler.GenerateHexID(20)
 	startTime := time.Now().UnixMilli()
 
 	callback := func(statusCode int, responseHeaders http.Header, responseBody []byte) {
@@ -146,35 +159,37 @@ func (h *PresidioHandler) getMaskedEntities(config cfg.PresidioPIIConfig, result
 	return masked
 }
 
-func (h *PresidioHandler) buildAnAnonymizers(config cfg.PresidioPIIConfig) map[string]cfg.AnonymizerConfig {
-	anonymizerConfig := cfg.AnonymizerConfig{
-		Type: config.Anonymizer,
+func (h *PresidioHandler) buildAnAnonymizers(config cfg.PresidioPIIConfig, entities []cfg.AnalyzeResult) map[string]cfg.AnonymizerConfig {
+	anonymizers := make(map[string]cfg.AnonymizerConfig)
+
+	hasCustomConfig := false
+	for _, entity := range entities {
+		entityType := entity.EntityType
+		for _, configEntity := range config.Entities {
+			if configEntity.EntityType == entityType && configEntity.Anonymizer != nil {
+				anonymizers[entityType] = *configEntity.Anonymizer
+				hasCustomConfig = true
+				break
+			}
+		}
 	}
-	if config.Anonymizer == cfg.AnonymizerHash {
-		anonymizerConfig.HashType = "sha256"
+
+	if !hasCustomConfig {
+		return nil
 	}
-	return map[string]cfg.AnonymizerConfig{
-		"DEFAULT": anonymizerConfig,
-	}
+
+	return anonymizers
 }
 
 func (h *PresidioHandler) anonymizeAndReplaceRequest(ctx wrapper.HttpContext, config cfg.PresidioPIIConfig, originalBody []byte, content string, entities []cfg.AnalyzeResult, sessionID string) {
 	startTime := time.Now().UnixMilli()
-	anonymizeResults := make([]cfg.AnonymizeResult, 0)
-	for _, entity := range entities {
-		anonymizeResults = append(anonymizeResults, cfg.AnonymizeResult{
-			Start:      entity.Start,
-			End:        entity.End,
-			EntityType: entity.EntityType,
-		})
-	}
 
-	anonymizers := h.buildAnAnonymizers(config)
+	anonymizers := h.buildAnAnonymizers(config, entities)
 
 	anonymizeReq := cfg.AnonymizeRequest{
-		Text:             content,
-		AnonymizeResults: anonymizeResults,
-		Anonymizers:      anonymizers,
+		Text:            content,
+		AnalyzerResults: entities,
+		Anonymizers:     anonymizers,
 	}
 
 	reqBody, _ := json.Marshal(anonymizeReq)
@@ -224,25 +239,36 @@ func (h *PresidioHandler) replaceContentInJSON(originalBody []byte, jsonPath str
 
 	result := gjson.GetBytes(originalBody, jsonPath)
 	if !result.Exists() {
+		log.Debugf("Path %s does not exist in JSON", jsonPath)
 		return originalBody
 	}
 
-	modified := gjson.ParseBytes(originalBody)
-	modifiedStr := modified.Raw
+	// 处理包含 @reverse 的路径（sjson 不支持）
+	replacePath := jsonPath
+	if strings.Contains(jsonPath, "@reverse") {
+		// 对于 messages.@reverse.0.content，等价于 messages.(len-1).content
+		// 我们需要先获取实际的索引
+		messagesResult := gjson.GetBytes(originalBody, "messages")
+		if messagesResult.Exists() && messagesResult.Type == gjson.JSON {
+			messages := messagesResult.Array()
+			if len(messages) > 0 {
+				lastIndex := len(messages) - 1
+				replacePath = strings.Replace(jsonPath, "@reverse.0", fmt.Sprintf("%d", lastIndex), 1)
+			}
+		}
+	}
 
-	startIdx := result.Index
-	endIdx := startIdx + len(result.Raw)
+	modifiedBody, err := sjson.SetBytes(originalBody, replacePath, newContent)
+	if err != nil {
+		log.Errorf("Failed to replace content in JSON: %v", err)
+		return originalBody
+	}
 
-	newBody := make([]byte, 0, len(originalBody))
-	newBody = append(newBody, modifiedStr[:startIdx]...)
-	newBody = append(newBody, []byte(fmt.Sprintf("%q", newContent))...)
-	newBody = append(newBody, modifiedStr[endIdx:]...)
-
-	return newBody
+	return modifiedBody
 }
 
 func (h *PresidioHandler) sendDenyResponse(ctx wrapper.HttpContext, config cfg.PresidioPIIConfig, body []byte, isStreaming bool, blockedEntities []cfg.AnalyzeResult, startTime int64) {
-	randomID := h.generateRandomChatID()
+	randomID := h.GenerateRandomChatID()
 	denyMessage := config.DenyMessage
 	if denyMessage == "" {
 		denyMessage = cfg.DefaultDenyMessage
@@ -297,7 +323,7 @@ func HandleResponseBody(ctx wrapper.HttpContext, config cfg.PresidioPIIConfig, b
 		return types.ActionContinue
 	}
 
-	sessionID, _ := Handler.generateHexID(20)
+	sessionID, _ := Handler.GenerateHexID(20)
 	startTime := time.Now().UnixMilli()
 
 	callback := func(statusCode int, responseHeaders http.Header, responseBody []byte) {
@@ -365,21 +391,12 @@ func HandleResponseBody(ctx wrapper.HttpContext, config cfg.PresidioPIIConfig, b
 }
 
 func (h *PresidioHandler) anonymizeAndReplaceResponse(ctx wrapper.HttpContext, config cfg.PresidioPIIConfig, originalBody []byte, content string, entities []cfg.AnalyzeResult, sessionID string, isStreaming bool) {
-	anonymizeResults := make([]cfg.AnonymizeResult, 0)
-	for _, entity := range entities {
-		anonymizeResults = append(anonymizeResults, cfg.AnonymizeResult{
-			Start:      entity.Start,
-			End:        entity.End,
-			EntityType: entity.EntityType,
-		})
-	}
-
-	anonymizers := h.buildAnAnonymizers(config)
+	anonymizers := h.buildAnAnonymizers(config, entities)
 
 	anonymizeReq := cfg.AnonymizeRequest{
-		Text:             content,
-		AnonymizeResults: anonymizeResults,
-		Anonymizers:      anonymizers,
+		Text:            content,
+		AnalyzerResults: entities,
+		Anonymizers:     anonymizers,
 	}
 
 	reqBody, _ := json.Marshal(anonymizeReq)
@@ -438,11 +455,15 @@ func extractMessageFromStreamingBody(data []byte, jsonPath string) string {
 
 func HandleStreamingResponseBody(ctx wrapper.HttpContext, config cfg.PresidioPIIConfig, data []byte, endOfStream bool) []byte {
 	var sessionID string
-	if ctx.GetContext("sessionID") == nil {
-		sessionID, _ = Handler.generateHexID(20)
+	sessionIDVal := ctx.GetContext("sessionID")
+	if sessionIDVal == nil {
+		sessionID, _ = Handler.GenerateHexID(20)
 		ctx.SetContext("sessionID", sessionID)
+	} else if val, ok := sessionIDVal.(string); ok {
+		sessionID = val
 	} else {
-		sessionID, _ = ctx.GetContext("sessionID").(string)
+		sessionID, _ = Handler.GenerateHexID(20)
+		ctx.SetContext("sessionID", sessionID)
 	}
 
 	var bufferQueue [][]byte
@@ -453,7 +474,7 @@ func HandleStreamingResponseBody(ctx wrapper.HttpContext, config cfg.PresidioPII
 
 		if statusCode != 200 {
 			log.Errorf("Presidio analyze failed with status: %d", statusCode)
-			if ctx.GetContext("end_of_stream_received").(bool) {
+			if getBoolContext(ctx, "end_of_stream_received", false) {
 				proxywasm.ResumeHttpResponse()
 			}
 			ctx.SetContext("during_call", false)
@@ -464,7 +485,7 @@ func HandleStreamingResponseBody(ctx wrapper.HttpContext, config cfg.PresidioPII
 		err := json.Unmarshal(responseBody, &analyzeResp)
 		if err != nil {
 			log.Errorf("Failed to unmarshal Presidio analyze response: %v", err)
-			if ctx.GetContext("end_of_stream_received").(bool) {
+			if getBoolContext(ctx, "end_of_stream_received", false) {
 				proxywasm.ResumeHttpResponse()
 			}
 			ctx.SetContext("during_call", false)
@@ -484,7 +505,7 @@ func HandleStreamingResponseBody(ctx wrapper.HttpContext, config cfg.PresidioPII
 			return
 		}
 
-		endStream := ctx.GetContext("end_of_stream_received").(bool) && ctx.BufferQueueSize() == 0
+		endStream := getBoolContext(ctx, "end_of_stream_received", false) && ctx.BufferQueueSize() == 0
 		proxywasm.InjectEncodedDataToFilterChain(bytes.Join(bufferQueue, []byte("")), endStream)
 		bufferQueue = [][]byte{}
 		if !endStream {
@@ -494,11 +515,11 @@ func HandleStreamingResponseBody(ctx wrapper.HttpContext, config cfg.PresidioPII
 	}
 
 	singleCall = func() {
-		if ctx.GetContext("during_call").(bool) {
+		if getBoolContext(ctx, "during_call", false) {
 			return
 		}
 
-		if ctx.BufferQueueSize() >= config.BufferLimit || ctx.GetContext("end_of_stream_received").(bool) {
+		if ctx.BufferQueueSize() >= config.BufferLimit || getBoolContext(ctx, "end_of_stream_received", false) {
 			var buffer string
 			for ctx.BufferQueueSize() > 0 {
 				front := ctx.PopBuffer()
@@ -518,11 +539,11 @@ func HandleStreamingResponseBody(ctx wrapper.HttpContext, config cfg.PresidioPII
 
 			entityTypes := config.GetAllEntityTypes()
 			if len(entityTypes) == 0 {
-				endStream := ctx.GetContext("end_of_stream_received").(bool) && ctx.BufferQueueSize() == 0
+				endStream := getBoolContext(ctx, "end_of_stream_received", false) && ctx.BufferQueueSize() == 0
 				proxywasm.InjectEncodedDataToFilterChain(bytes.Join(bufferQueue, []byte("")), endStream)
 				bufferQueue = [][]byte{}
 				ctx.SetContext("during_call", false)
-				if ctx.GetContext("end_of_stream_received").(bool) {
+				if getBoolContext(ctx, "end_of_stream_received", false) {
 					proxywasm.ResumeHttpResponse()
 				}
 				return
@@ -543,14 +564,14 @@ func HandleStreamingResponseBody(ctx wrapper.HttpContext, config cfg.PresidioPII
 			err := config.AnalyzerClient.Post(config.AnalyzerPath, headers, reqBody, callback, config.Timeout)
 			if err != nil {
 				log.Errorf("Failed to call Presidio analyze service: %v", err)
-				if ctx.GetContext("end_of_stream_received").(bool) {
+				if getBoolContext(ctx, "end_of_stream_received", false) {
 					proxywasm.ResumeHttpResponse()
 				}
 			}
 		}
 	}
 
-	if !ctx.GetContext("risk_detected").(bool) {
+	if !getBoolContext(ctx, "risk_detected", false) {
 		unifiedChunk := wrapper.UnifySSEChunk(data)
 		hasTrailingSeparator := bytes.HasSuffix(unifiedChunk, []byte("\n\n"))
 		trimmedChunk := bytes.TrimSpace(unifiedChunk)
@@ -575,7 +596,7 @@ func HandleStreamingResponseBody(ctx wrapper.HttpContext, config cfg.PresidioPII
 		}
 
 		ctx.SetContext("end_of_stream_received", endOfStream)
-		if !ctx.GetContext("during_call").(bool) {
+		if !getBoolContext(ctx, "during_call", false) {
 			singleCall()
 		}
 	} else if endOfStream {
@@ -586,7 +607,7 @@ func HandleStreamingResponseBody(ctx wrapper.HttpContext, config cfg.PresidioPII
 }
 
 func (h *PresidioHandler) sendStreamingDenyResponse(ctx wrapper.HttpContext, config cfg.PresidioPIIConfig, blockedEntities []cfg.AnalyzeResult) {
-	randomID := h.generateRandomChatID()
+	randomID := h.GenerateRandomChatID()
 	denyMessage := config.DenyMessage
 	if denyMessage == "" {
 		denyMessage = cfg.DefaultDenyMessage
@@ -615,21 +636,12 @@ func (h *PresidioHandler) handleStreamingAnonymize(ctx wrapper.HttpContext, conf
 		buffer += msg
 	}
 
-	anonymizeResults := make([]cfg.AnonymizeResult, 0)
-	for _, entity := range entities {
-		anonymizeResults = append(anonymizeResults, cfg.AnonymizeResult{
-			Start:      entity.Start,
-			End:        entity.End,
-			EntityType: entity.EntityType,
-		})
-	}
-
-	anonymizers := h.buildAnAnonymizers(config)
+	anonymizers := h.buildAnAnonymizers(config, entities)
 
 	anonymizeReq := cfg.AnonymizeRequest{
-		Text:             buffer,
-		AnonymizeResults: anonymizeResults,
-		Anonymizers:      anonymizers,
+		Text:            buffer,
+		AnalyzerResults: entities,
+		Anonymizers:     anonymizers,
 	}
 
 	reqBody, _ := json.Marshal(anonymizeReq)
@@ -642,7 +654,7 @@ func (h *PresidioHandler) handleStreamingAnonymize(ctx wrapper.HttpContext, conf
 
 		if statusCode != 200 {
 			log.Errorf("Presidio anonymize failed with status: %d", statusCode)
-			endStream := ctx.GetContext("end_of_stream_received").(bool) && ctx.BufferQueueSize() == 0
+			endStream := getBoolContext(ctx, "end_of_stream_received", false) && ctx.BufferQueueSize() == 0
 			proxywasm.InjectEncodedDataToFilterChain(bytes.Join(bufferQueue, []byte("")), endStream)
 			return
 		}
@@ -651,7 +663,7 @@ func (h *PresidioHandler) handleStreamingAnonymize(ctx wrapper.HttpContext, conf
 		err := json.Unmarshal(responseBody, &anonymizeResp)
 		if err != nil {
 			log.Errorf("Failed to unmarshal Presidio anonymize response: %v", err)
-			endStream := ctx.GetContext("end_of_stream_received").(bool) && ctx.BufferQueueSize() == 0
+			endStream := getBoolContext(ctx, "end_of_stream_received", false) && ctx.BufferQueueSize() == 0
 			proxywasm.InjectEncodedDataToFilterChain(bytes.Join(bufferQueue, []byte("")), endStream)
 			return
 		}
@@ -662,7 +674,7 @@ func (h *PresidioHandler) handleStreamingAnonymize(ctx wrapper.HttpContext, conf
 			modifiedChunks = append(modifiedChunks, modifiedChunk)
 		}
 
-		endStream := ctx.GetContext("end_of_stream_received").(bool) && ctx.BufferQueueSize() == 0
+		endStream := getBoolContext(ctx, "end_of_stream_received", false) && ctx.BufferQueueSize() == 0
 		proxywasm.InjectEncodedDataToFilterChain(bytes.Join(modifiedChunks, []byte("")), endStream)
 
 		ctx.SetUserAttribute("presidio_pii_status", "response masked")
@@ -673,7 +685,7 @@ func (h *PresidioHandler) handleStreamingAnonymize(ctx wrapper.HttpContext, conf
 	err := config.AnonymizerClient.Post(config.AnonymizerPath, headers, reqBody, callback, config.Timeout)
 	if err != nil {
 		log.Errorf("Failed to call Presidio anonymize service: %v", err)
-		endStream := ctx.GetContext("end_of_stream_received").(bool) && ctx.BufferQueueSize() == 0
+		endStream := getBoolContext(ctx, "end_of_stream_received", false) && ctx.BufferQueueSize() == 0
 		proxywasm.InjectEncodedDataToFilterChain(bytes.Join(bufferQueue, []byte("")), endStream)
 	}
 }

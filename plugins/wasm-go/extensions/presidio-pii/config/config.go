@@ -18,10 +18,6 @@ const (
 	FilterScopeOutput = "output"
 	FilterScopeBoth   = "both"
 
-	AnonymizerHash     = "hash"
-	AnonymizerAsterisk = "asterisk"
-	AnonymizerRedact   = "redact"
-
 	DefaultTimeout     = 2000
 	DefaultBufferLimit = 1000
 	DefaultDenyCode    = 200
@@ -39,9 +35,10 @@ const (
 )
 
 type PIIEntity struct {
-	EntityType     string  `json:"entityType"`
-	Action         string  `json:"action"`
-	ScoreThreshold float64 `json:"scoreThreshold"`
+	EntityType     string            `json:"entityType"`
+	Action         string            `json:"action"`
+	ScoreThreshold float64           `json:"scoreThreshold"`
+	Anonymizer     *AnonymizerConfig `json:"anonymizer,omitempty"`
 }
 
 type PresidioPIIConfig struct {
@@ -67,7 +64,6 @@ type PresidioPIIConfig struct {
 	Entities                      []PIIEntity
 	DefaultAction                 string
 	DefaultScoreThreshold         float64
-	Anonymizer                    string
 	DenyCode                      int64
 	DenyMessage                   string
 	ProtocolOriginal              bool
@@ -77,36 +73,60 @@ type PresidioPIIConfig struct {
 }
 
 type AnalyzeRequest struct {
-	Text           string   `json:"text"`
-	Entities       []string `json:"entities"`
-	Language       string   `json:"language"`
-	ScoreThreshold float64  `json:"scoreThreshold"`
+	Text                  string   `json:"text"`
+	Language              string   `json:"language"`
+	Entities              []string `json:"entities,omitempty"`
+	ScoreThreshold        float64  `json:"score_threshold,omitempty"`
+	CorrelationID         string   `json:"correlation_id,omitempty"`
+	ReturnDecisionProcess bool     `json:"return_decision_process,omitempty"`
+	Context               []string `json:"context,omitempty"`
+	AllowList             []string `json:"allow_list,omitempty"`
+	AllowListMatch        string   `json:"allow_list_match,omitempty"`
 }
 
 type AnalyzeResponse []AnalyzeResult
 
+type AnalysisExplanation struct {
+	TextualExplanation string  `json:"textual_explanation"`
+	Score              float64 `json:"score"`
+	ScanResult         *struct {
+		Value          string `json:"value"`
+		DateOfScan     string `json:"date_of_scan"`
+		RecognizerName string `json:"recognizer_name"`
+		Pattern        string `json:"pattern,omitempty"`
+	} `json:"scan_result"`
+	RegexFlags   []string  `json:"regex_flags,omitempty"`
+	ScoreContext []float64 `json:"score_context,omitempty"`
+}
+
+type RecognitionMetadata struct {
+	RecognizerName string `json:"recognizer_name"`
+	PatternName    string `json:"pattern_name,omitempty"`
+}
+
 type AnalyzeResult struct {
-	EntityType string  `json:"entity_type"`
-	Start      int     `json:"start"`
-	End        int     `json:"end"`
-	Score      float64 `json:"score"`
+	EntityType          string               `json:"entity_type"`
+	Start               int                  `json:"start"`
+	End                 int                  `json:"end"`
+	Score               float64              `json:"score"`
+	AnalysisExplanation *AnalysisExplanation `json:"analysis_explanation,omitempty"`
+	RecognitionMetadata *RecognitionMetadata `json:"recognition_metadata,omitempty"`
 }
 
 type AnonymizeRequest struct {
-	Text             string                      `json:"text"`
-	AnonymizeResults []AnonymizeResult           `json:"anonymize_results"`
-	Anonymizers      map[string]AnonymizerConfig `json:"anonymizers"`
-}
-
-type AnonymizeResult struct {
-	Start      int    `json:"start"`
-	End        int    `json:"end"`
-	EntityType string `json:"entity_type"`
+	Text            string                      `json:"text"`
+	AnalyzerResults []AnalyzeResult             `json:"analyzer_results"`
+	Anonymizers     map[string]AnonymizerConfig `json:"anonymizers,omitempty"`
 }
 
 type AnonymizerConfig struct {
-	Type     string `json:"type"`
-	HashType string `json:"hash_type,omitempty"`
+	Type        string `json:"type"`
+	HashType    string `json:"hash_type,omitempty"`
+	NewValue    string `json:"new_value,omitempty"`
+	Key         string `json:"key,omitempty"`
+	MaskingChar string `json:"masking_char,omitempty"`
+	CharsToMask int    `json:"chars_to_mask,omitempty"`
+	FromEnd     bool   `json:"from_end,omitempty"`
 }
 
 type AnonymizeResponse struct {
@@ -117,8 +137,9 @@ type AnonymizeResponse struct {
 type AnonymizeResponseItem struct {
 	Start      int    `json:"start"`
 	End        int    `json:"end"`
-	EntityType string `json:"entity_type"`
-	Anonymizer string `json:"anonymizer"`
+	Text       string `json:"text,omitempty"`
+	Operator   string `json:"operator"`
+	EntityType string `json:"entity_type,omitempty"`
 }
 
 func (config *PresidioPIIConfig) Parse(json gjson.Result) error {
@@ -204,11 +225,6 @@ func (config *PresidioPIIConfig) Parse(json gjson.Result) error {
 		config.DenyCode = obj.Int()
 	} else {
 		config.DenyCode = DefaultDenyCode
-	}
-
-	config.Anonymizer = json.Get("anonymizer").String()
-	if config.Anonymizer == "" {
-		config.Anonymizer = AnonymizerHash
 	}
 
 	if obj := json.Get("timeout"); obj.Exists() {

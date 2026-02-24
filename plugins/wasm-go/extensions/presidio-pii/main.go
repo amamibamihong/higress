@@ -76,12 +76,15 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config cfg.PresidioPIIConfig
 
 	contentType, _ := proxywasm.GetHttpResponseHeader("content-type")
 
-	if !config.ProtocolOriginal {
-		if shouldCheckResponse && len(contentType) > 0 {
-			if contains(contentType, "text/event-stream") {
-				ctx.NeedPauseStreamingResponse()
-				return types.ActionContinue
-			}
+	if !config.ProtocolOriginal && shouldCheckResponse && len(contentType) > 0 {
+		if contains(contentType, "text/event-stream") {
+			ctx.SetContext("end_of_stream_received", false)
+			ctx.SetContext("during_call", false)
+			ctx.SetContext("risk_detected", false)
+			sessionID, _ := handler.Handler.GenerateHexID(20)
+			ctx.SetContext("sessionID", sessionID)
+			ctx.NeedPauseStreamingResponse()
+			return types.ActionContinue
 		}
 	}
 

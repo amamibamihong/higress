@@ -97,10 +97,6 @@ func TestParseConfig(t *testing.T) {
 		t.Errorf("Expected defaultScoreThreshold 0.85, got %f", config.DefaultScoreThreshold)
 	}
 
-	if config.Anonymizer != cfg.AnonymizerHash {
-		t.Errorf("Expected anonymizer '%s', got '%s'", cfg.AnonymizerHash, config.Anonymizer)
-	}
-
 	if len(config.Entities) != 3 {
 		t.Fatalf("Expected 3 entities, got %d", len(config.Entities))
 	}
@@ -249,11 +245,12 @@ func TestAnalyzeRequestSerialization(t *testing.T) {
 func TestAnonymizeRequestSerialization(t *testing.T) {
 	req := cfg.AnonymizeRequest{
 		Text: "Hello John Doe",
-		AnonymizeResults: []cfg.AnonymizeResult{
+		AnalyzerResults: []cfg.AnalyzeResult{
 			{
+				EntityType: "PERSON",
 				Start:      6,
 				End:        14,
-				EntityType: "PERSON",
+				Score:      0.95,
 			},
 		},
 		Anonymizers: map[string]cfg.AnonymizerConfig{
@@ -279,12 +276,12 @@ func TestAnonymizeRequestSerialization(t *testing.T) {
 		t.Errorf("Expected text '%s', got '%s'", req.Text, unmarshaled.Text)
 	}
 
-	if len(unmarshaled.AnonymizeResults) != len(req.AnonymizeResults) {
-		t.Errorf("Expected %d anonymize results, got %d", len(req.AnonymizeResults), len(unmarshaled.AnonymizeResults))
+	if len(unmarshaled.AnalyzerResults) != len(req.AnalyzerResults) {
+		t.Errorf("Expected %d analyzer results, got %d", len(req.AnalyzerResults), len(unmarshaled.AnalyzerResults))
 	}
 
-	if unmarshaled.AnonymizeResults[0].Start != req.AnonymizeResults[0].Start {
-		t.Errorf("Expected start %d, got %d", req.AnonymizeResults[0].Start, unmarshaled.AnonymizeResults[0].Start)
+	if unmarshaled.AnalyzerResults[0].Start != req.AnalyzerResults[0].Start {
+		t.Errorf("Expected start %d, got %d", req.AnalyzerResults[0].Start, unmarshaled.AnalyzerResults[0].Start)
 	}
 }
 

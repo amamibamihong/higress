@@ -29,7 +29,6 @@ description: 使用 Presidio 检测和屏蔽个人身份信息(PII)
 | `language` | string | optional | `zh` | 检测语言 |
 | `defaultAction` | string | optional | `MASK` | 默认动作：`MASK`、`BLOCK` 或 `NONE` |
 | `defaultScoreThreshold` | float | optional | `0.85` | 默认评分阈值 |
-| `anonymizer` | string | optional | `hash` | 屏蔽方式：`hash`、`asterisk` 或 `redact` |
 | `denyCode` | int | optional | `200` | 检测到阻断实体时的响应状态码 |
 | `denyMessage` | string | optional | `很抱歉，内容包含敏感信息` | 检测到阻断实体时的响应内容 |
 | `protocol` | string | optional | `openai` | 协议格式，非 openai 协议填 `original` |
@@ -37,18 +36,26 @@ description: 使用 Presidio 检测和屏蔽个人身份信息(PII)
 | `bufferLimit` | int | optional | `1000` | 流式响应缓冲区限制 |
 | `entities` | array | optional | - | 实体类型配置列表 |
 | `entities[].entityType` | string | required | - | 实体类型，如 `PERSON`、`EMAIL_ADDRESS` 等 |
+| `entities[].anonymizer` | object | optional | - | 实体级别的匿名化配置（覆盖默认MASK操作） |
 | `entities[].action` | string | optional | `defaultAction` | 该实体的动作 |
 | `entities[].scoreThreshold` | float | optional | `defaultScoreThreshold` | 该实体的评分阈值 |
 
 ### 动作类型说明
-- `MASK`：用占位符/哈希替换 PII
+- `MASK`：使用默认的 mask 操作替换 PII（可通过 entity 级别的 anonymizer 配置覆盖）
 - `BLOCK`：完全拒绝请求
 - `NONE`：不处理该实体
 
-### 屏蔽方式说明
-- `hash`：使用 SHA256 哈希替换
-- `asterisk`：使用星号替换
-- `redact`：直接删除
+### 实体级别匿名化配置说明
+在 entity 配置中可以通过 `anonymizer` 字段自定义匿名化方式，支持的配置包括：
+- `type`: 操作类型（mask、replace、redact、encrypt、hash 等）
+- `new_value`: replace 操作时使用的替换字符串
+- `masking_char`: mask 操作时使用的掩盖字符
+- `chars_to_mask`: mask 操作时掩盖的字符数
+- `from_end`: mask 操作时是否从末尾开始
+- `key`: encrypt 操作时使用的加密密钥
+- `hash_type`: hash 操作时使用的哈希类型（如 sha256）
+
+如果不提供 `anonymizer` 配置，系统将使用 Presidio 默认的 mask 操作。
 
 ### 检测范围说明
 - `input`：仅检测用户 → 模型的内容（请求输入）
@@ -197,7 +204,7 @@ entities:
     action: MASK
 ```
 
-### 使用星号屏蔽
+### 使用实体级别的自定义匿名化配置
 
 ```yaml
 analyzerServiceName: presidio-analyzer.dns
@@ -212,12 +219,21 @@ anonymizerPath: "/anonymize"
 
 checkRequest: true
 checkResponse: true
-anonymizer: asterisk
 entities:
-  - entityType: PERSON
-    action: MASK
   - entityType: EMAIL_ADDRESS
     action: MASK
+    scoreThreshold: 0.90
+    anonymizer:
+      type: replace
+      new_value: "[邮箱已隐藏]"
+  - entityType: PERSON
+    action: MASK
+    scoreThreshold: 0.85
+    anonymizer:
+      type: mask
+      masking_char: "*"
+      chars_to_mask: 4
+      from_end: true
 ```
 
 ### 配置非 openai 协议
@@ -345,21 +361,27 @@ curl http://localhost/v1/chat/completions \
 ```json
 {
   "text": "原始文本",
-  "anonymize_results": [
+  "analyzer_results": [
     {
+      "entity_type": "PERSON",
       "start": 0,
       "end": 10,
-      "entity_type": "PERSON"
+      "score": 0.98
     }
   ],
   "anonymizers": {
-    "DEFAULT": {
-      "type": "hash",
-      "hash_type": "sha256"
+    "PERSON": {
+      "type": "mask",
+      "masking_char": "*"
     }
   }
 }
 ```
+注意：
+- `analyzer_results` 字段包含从 Analyzer 服务返回的分析结果
+- `anonymizers` 是可选的，如果不提供则使用 Presidio 默认的 mask 操作
+- 可以针对每种实体类型配置不同的匿名化方式
+
 - 响应体：
 ```json
 {
@@ -369,7 +391,7 @@ curl http://localhost/v1/chat/completions \
       "start": 0,
       "end": 10,
       "entity_type": "PERSON",
-      "anonymizer": "hash"
+      "anonymizer": "mask"
     }
   ]
 }
