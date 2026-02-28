@@ -140,10 +140,10 @@ func getDefaultAttributes() []Attribute {
 	return []Attribute{
 		// Extract complete conversation history from request body
 		{
-			Key:        "messages",
+			Key:         "messages",
 			ValueSource: RequestBody,
-			Value:      "messages",
-			ApplyToLog: true,
+			Value:       "messages",
+			ApplyToLog:  true,
 		},
 		// Built-in attributes (no value_source needed, will be auto-extracted)
 		{
@@ -211,10 +211,10 @@ func extractSessionId(customHeader string) string {
 
 // ToolCall represents a single tool call in the response
 type ToolCall struct {
-	Index    int                    `json:"index,omitempty"`
-	ID       string                 `json:"id,omitempty"`
-	Type     string                 `json:"type,omitempty"`
-	Function ToolCallFunction       `json:"function,omitempty"`
+	Index    int              `json:"index,omitempty"`
+	ID       string           `json:"id,omitempty"`
+	Type     string           `json:"type,omitempty"`
+	Function ToolCallFunction `json:"function,omitempty"`
 }
 
 // ToolCallFunction represents the function details in a tool call
@@ -245,7 +245,7 @@ func extractStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuffer) *S
 
 		for _, tcResult := range toolCallsResult.Array() {
 			index := int(tcResult.Get("index").Int())
-			
+
 			// Get or create tool call entry
 			tc, exists := buffer.ToolCalls[index]
 			if !exists {
@@ -525,6 +525,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 	}
 	if consumer, _ := proxywasm.GetHttpRequestHeader(ConsumerKey); consumer != "" {
 		ctx.SetContext(ConsumerKey, consumer)
+		setSpanAttribute(ConsumerKey, consumer)
 	}
 
 	ctx.SetRequestBodyBufferLimit(defaultMaxBodyBytes)
@@ -533,6 +534,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 	sessionId := extractSessionId(config.sessionIdHeader)
 	if sessionId != "" {
 		ctx.SetUserAttribute(SessionID, sessionId)
+		setSpanAttribute(SessionID, sessionId)
 	}
 
 	// Set span attributes for ARMS.
@@ -665,7 +667,7 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 			setSpanAttribute(ArmsModelName, usage.Model)
 			setSpanAttribute(ArmsInputToken, usage.InputToken)
 			setSpanAttribute(ArmsOutputToken, usage.OutputToken)
-			
+
 			// Set token details to context for later use in attributes
 			if len(usage.InputTokenDetails) > 0 {
 				ctx.SetContext(tokenusage.CtxKeyInputTokenDetails, usage.InputTokenDetails)
@@ -729,7 +731,7 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 			setSpanAttribute(ArmsInputToken, usage.InputToken)
 			setSpanAttribute(ArmsOutputToken, usage.OutputToken)
 			setSpanAttribute(ArmsTotalToken, usage.TotalToken)
-			
+
 			// Set token details to context for later use in attributes
 			if len(usage.InputTokenDetails) > 0 {
 				ctx.SetContext(tokenusage.CtxKeyInputTokenDetails, usage.InputTokenDetails)
@@ -797,7 +799,7 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 		if (value == nil || value == "") && attribute.DefaultValue != "" {
 			value = attribute.DefaultValue
 		}
-		
+
 		// Format value for logging/span
 		var formattedValue interface{}
 		switch v := value.(type) {
@@ -816,7 +818,7 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 				formattedValue = fmt.Sprint(value)[:config.valueLengthLimit/2] + " [truncated] " + fmt.Sprint(value)[len(fmt.Sprint(value))-config.valueLengthLimit/2:]
 			}
 		}
-		
+
 		log.Debugf("[attribute] source type: %s, key: %s, value: %+v", source, key, formattedValue)
 		if attribute.ApplyToLog {
 			if attribute.AsSeparateLogField {
@@ -925,7 +927,7 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 			}
 			buffer = extractStreamingToolCalls(body, buffer)
 			ctx.SetContext(CtxStreamingToolCallsBuffer, buffer)
-			
+
 			// Also set tool_calls to user attributes so they appear in ai_log
 			toolCalls := getToolCallsFromBuffer(buffer)
 			if len(toolCalls) > 0 {
@@ -1108,7 +1110,22 @@ func debugLogAiLog(ctx wrapper.HttpContext) {
 func setSpanAttribute(key string, value interface{}) {
 	if value != "" {
 		traceSpanTag := wrapper.TraceSpanTagPrefix + key
-		if e := proxywasm.SetProperty([]string{traceSpanTag}, []byte(fmt.Sprint(value))); e != nil {
+		var stringValue string
+		switch v := value.(type) {
+		case string:
+			stringValue = v
+		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, bool:
+			jsonBytes, _ := json.Marshal(value)
+			stringValue = string(jsonBytes)
+		default:
+			jsonBytes, err := json.Marshal(value)
+			if err == nil {
+				stringValue = string(jsonBytes)
+			} else {
+				stringValue = fmt.Sprint(value)
+			}
+		}
+		if e := proxywasm.SetProperty([]string{traceSpanTag}, []byte(stringValue)); e != nil {
 			log.Warnf("failed to set %s in filter state: %v", traceSpanTag, e)
 		}
 	} else {
