@@ -6,7 +6,7 @@ description: AI 配额管理插件配置参考
 
 ## 功能说明
 
-`ai-quota` 插件实现给特定 consumer 根据分配固定的 quota 进行 quota 策略限流，同时支持 quota 管理能力，包括查询 quota 、刷新 quota、增减 quota。
+`ai-quota` 插件实现给特定 consumer 根据分配固定的 quota 进行 quota 策略限流，同时支持 quota 管理能力，包括查询 quota 、刷新 quota、增减 quota。插件支持双重预算管理机制，可同时控制 token 用量和费用上限，支持按模型配置差异化费率。
 
 `ai-quota` 插件需要配合 认证插件比如 `key-auth`、`jwt-auth` 等插件获取认证身份的 consumer 名称，同时需要配合 `ai-statistics` 插件获取 AI Token 统计信息。
 
@@ -22,6 +22,7 @@ description: AI 配额管理插件配置参考
 | `redis_key_prefix` | string          |  选填                                     |   chat_quota:   | qutoa redis key 前缀                         |
 | `admin_consumer`   | string          | 必填                                   |      | 管理 quota 管理身份的 consumer 名称                 |
 | `admin_path`       | string          | 选填                                   |   /quota   | 管理 quota 请求 path 前缀                        |
+| `precision`        | int             | 选填                                   |   9   | 金额精度，默认为 9（纳元级别）                         |
 | `redis`            | object          | 是                                    |      | redis相关配置                                  |
 
 `redis`中每一项的配置字段说明
@@ -50,22 +51,38 @@ redis:
 ```
 
 
-###  刷新 quota
+###  刷新预算
 
-如果当前请求 url 的后缀符合 admin_path，例如插件在 example.com/v1/chat/completions 这个路由上生效，那么更新 quota 可以通过
-curl https://example.com/v1/chat/completions/quota/refresh -H "Authorization: Bearer credential3" -d "consumer=consumer1&quota=10000" 
+如果当前请求 url 的后缀符合 admin_path，例如插件在 example.com/v1/chat/completions 这个路由上生效，那么更新预算可以通过
+curl https://example.com/v1/chat/completions/quota/refresh -H "Authorization: Bearer credential3" -d "consumer=consumer1&token_budget=10000&cost_budget=100.0"
 
-Redis 中 key 为 chat_quota:consumer1 的值就会被刷新为 10000
+Redis 中 key 为 chat_quota:token_budget:consumer1 的值就会被刷新为 10000，chat_quota:cost_budget:consumer1 的值会被设置为 100000000000（纳元精度）
 
-### 查询 quota
+### 查询预算
 
-查询特定用户的 quota 可以通过 curl https://example.com/v1/chat/completions/quota?consumer=consumer1 -H "Authorization: Bearer credential3"
-将返回： {"quota": 10000, "consumer": "consumer1"}
+查询特定用户的预算可以通过 curl https://example.com/v1/chat/completions/quota?consumer=consumer1 -H "Authorization: Bearer credential3"
+将返回： {"consumer": "consumer1", "token_budget": 10000, "cost_budget": 100.000000000}
 
-### 增减 quota
+### 增减预算
 
-增减特定用户的 quota 可以通过 curl https://example.com/v1/chat/completions/quota/delta -d "consumer=consumer1&value=100" -H "Authorization: Bearer credential3"
-这样 Redis 中 Key 为 chat_quota:consumer1 的值就会增加100，可以支持负数，则减去对应值。
+增减特定用户的预算可以通过 curl https://example.com/v1/chat/completions/quota/delta -d "consumer=consumer1&token_budget_delta=100&cost_budget_delta=1.0" -H "Authorization: Bearer credential3"
+这样 Redis 中 Key 为 chat_quota:token_budget:consumer1 的值就会增加 100，chat_quota:cost_budget:consumer1 的值就会增加 1000000000（纳元）。可以支持负数，则减去对应值。
+
+### 设置费率
+
+设定模型计费费率可通过
+curl https://example.com/v1/chat/completions/quota/setrate -H "Authorization: Bearer credential3" -d "provider=openai&model=gpt-4&input_rate=30.0&output_rate=60.0"
+
+**注意**: 不再支持默认费率配置。必须指定 provider 和 model 进行设置。
+费率单位为元/百万token,内部以纳元精度存储
+
+### 查询费率
+
+查询模型费率可通过
+curl https://example.com/v1/chat/completions/quota/getrate -H "Authorization: Bearer credential3" -d "provider=openai&model=gpt-4"
+将返回： {"provider": "openai", "model": "gpt-4", "input_rate": 30.000000000, "output_rate": 60.000000000}
+
+**注意**: 不再支持默认费率查询。必须指定 provider 和 model 进行查询。如果模型费率不存在，将返回零费率（成本为0，只扣除token）。
 
 ## 设计逻辑
 
@@ -171,28 +188,45 @@ graph TD
 
 | 操作类型 | URL 路径 | 描述 |
 |---------|----------|------|
-| 聊天请求 | `/v1/chat/completions` | AI 聊天请求，需要配额检查和扣减 |
-| 查询配额 | `/v1/chat/completions/quota?consumer=xxx` | 查询指定 consumer 的配额 |
-| 刷新配额 | `/v1/chat/completions/quota/refresh` | 刷新指定 consumer 的配额 |
-| 增减配额 | `/v1/chat/completions/quota/delta` | 增减指定 consumer 的配额 |
+| 聊天请求 | `/v1/chat/completions` | AI 聊天请求，需要双重预算检查和扣减 |
+| 查询预算 | `/v1/chat/completions/quota?consumer=xxx` | 查询指定 consumer 的 token 和费用预算 |
+| 刷新预算 | `/v1/chat/completions/quota/refresh` | 刷新指定 consumer 的 token 和费用预算 |
+| 增减预算 | `/v1/chat/completions/quota/delta` | 增减指定 consumer 的 token 和费用预算 |
+| 设置费率 | `/v1/chat/completions/quota/setrate` | 设置模型计费费率（默认或指定模型） |
+| 查询费率 | `/v1/chat/completions/quota/getrate` | 查询模型计费费率（默认或指定模型） |
 
 ### 数据模型
 
 #### Redis Key 设计
-- **格式**: `{redis_key_prefix}{consumer}`
-- **示例**: `chat_quota:consumer1`
-- **值类型**: 整数
-- **单位**: token
-- **含义**: 剩余可用配额
+- **格式**:
+  - `{redis_key_prefix}token_budget:{consumer}` - token 预算
+  - `{redis_key_prefix}cost_budget:{consumer}` - 费用预算
+  - `{redis_key_prefix}rate:default` - 默认费率配置
+  - `{redis_key_prefix}rate:model:{provider}:{model_name}` - 模型费率配置
+- **示例**: `chat_quota:token_budget:consumer1`, `chat_quota:cost_budget:consumer1`, `chat_quota:rate:model:openai:gpt-4`
+- **值类型**:
+  - token_budget：整数
+  - cost_budget：整数（纳元精度，实际值 = 存储值 / 10^9）
+  - rate 配置：JSON 字符串
+- **单位**:
+  - token_budget：token
+  - cost_budget：元（纳元精度存储）
+  - rate：元/百万token（纳元精度存储）
+- **含义**:
+  - token_budget：剩余可用 token 数量
+  - cost_budget：剩余可用金额
+  - rate 配置：模型的输入和输出费率
 
 #### 配额检查逻辑
-- 配额不存在：拒绝请求
-- 配额 ≤ 0：拒绝请求
-- 配额 > 0：允许请求，响应后扣减实际使用量
+- token 预算不存在：拒绝请求
+- token 预算 ≤ 0：拒绝请求
+- 费用预算不存在：拒绝请求
+- 费用预算 ≤ 0：拒绝请求
+- 两种预算都 > 0：允许请求，响应后扣减实际使用量
 
 #### 配额扣除逻辑
 
-配额扣除在响应体阶段进行，具体流程如下：
+配额扣除在响应体阶段进行，同时扣除 token 和费用，具体流程如下：
 
 ```mermaid
 graph TD
@@ -200,13 +234,17 @@ graph TD
     B -->|否| C[透传数据]
     B -->|是| D[累计input token数量]
     D --> E[累计output token数量]
-    E --> F{流式响应是否结束}
-    F -->|否| C
-    F -->|是| G[计算总token数]
-    G --> H[总token = input + output]
-    H --> I[执行Redis DECRBY操作]
-    I --> J[配额 = 配额 - 总token]
-    J --> K[完成响应]
+    E --> F[获取模型和供应商]
+    F --> G[查询模型费率]
+    G --> H{流式响应是否结束}
+    H -->|否| C
+    H -->|是| I[计算总token数]
+    I --> J[总token = input + output]
+    J --> K[计算费用]
+    K --> L[费用 = token * 费率 / 1000000]
+    L --> M[执行Redis DECRBY扣减token]
+    M --> N[执行Redis DECRBY扣减费用]
+    N --> O[完成响应]
 ```
 
 **扣除时机**：
@@ -215,18 +253,24 @@ graph TD
 
 **扣除计算公式**：
 ```
-扣除数量 = input_tokens + output_tokens
-新配额 = 当前配额 - 扣除数量
+token 扣除数量 = input_tokens + output_tokens
+费用扣除数量 = (input_tokens × input_rate + output_tokens × output_rate) / 1000000
+
+新 token 预算 = 当前 token 预算 - token 扣除数量
+新费用预算 = 当前费用预算 - 费用扣除数量（纳元精度）
 ```
 
 **扣除操作**：
-- 使用 Redis 的 `DECRBY` 命令原子性地减少配额
+- 使用 Redis 的 `DECRBY` 命令原子性地减少 token 预算
+- 使用 Redis 的 `DECRBY` 命令原子性地减少费用预算
 - 扣减操作在后台异步执行，不影响响应返回给客户端
+- 费率按 `provider:model_name` 从 Redis 查询，不存在则使用默认费率
 
 **边界情况处理**：
-- 如果配额不足扣减，Redis 会将配额减为负数
-- 配额为负数时，后续请求会被配额检查逻辑拒绝
-- 扣减失败不影响当前请求，但可能导致配额数据不准确
+- 如果预算不足扣减，Redis 会将预算减为负数
+- 预算为负数时，后续请求会被配额检查逻辑拒绝
+- 扣减失败不影响当前请求，但可能导致预算数据不准确
+- 费用计算采用整数运算，避免浮点精度问题
 
 ### 安全机制
 
@@ -255,6 +299,32 @@ graph TD
 3. **支持 Redis 集群**：支持大规模部署场景
 
 ## 限制与改进方向
+
+### 已实现功能
+
+#### 双重预算管理
+插件已实现双重预算管理机制，支持同时控制 token 用量和费用上限：
+
+- **token 预算**：控制用户的 token 使用量
+- **费用预算**：控制用户的费用支出
+- **双重检查**：请求前同时检查两种预算，任一不足则拒绝请求
+- **双重扣减**：请求完成后同时扣除 token 和费用
+
+#### 按模型配置费率
+插件支持按模型维度配置差异化费率：
+
+- **费率配置**：支持为不同模型设置不同的输入和输出费率
+- **费率存储**：费率按 `provider:model_name` 组合存储，支持多云厂商场景
+- **费率精度**：采用纳元精度存储（9位小数），避免浮点误差
+- **零费率回退**：如果模型费率不存在，使用零费率（成本为0，只扣除token）
+
+#### 精确计费
+实现了基于整数运算的精确计费机制：
+
+- **纳元精度**：所有金额计算采用纳元级别（10^9 精度）
+- **整数运算**：从配置到扣费全程使用整数运算，完全避免浮点精度问题
+- **字符串解析**：提供 `stringToIntegerCost` 函数直接将金额字符串转换为整数
+- **格式化输出**：API 响应时将整数转换为浮点数显示，保证可读性
 
 ### 待改进
 
@@ -293,22 +363,25 @@ graph TD
 
 ```
 配额粒度：路由 + Consumer
-配额类型：Token 总数（input + output）
+配额类型：Token 总数（input + output） + 费用预算（金额）
 ```
 
 - 支持通过 `redis_key_prefix` 配置实现按路由 + Consumer 维度设置配额
-- 只支持简单的 token 总数配额控制，不区分请求和响应
+- 支持双重预算：token 预算和费用预算
+- 支持按模型配置差异化费率（输入和输出分别计费）
 - 所有请求使用统一的计费标准
+- 费率单位为元/百万token，精度为纳元级别
 
 **实际业务需求**
 
 在实际 AI 服务中，计费模式更加复杂和多样化：
 
 1. **输入输出计费差异**
-   - 大部分模型厂商的输入和输出价格不同
+   - ✅ **已支持**：大部分模型厂商的输入和输出价格不同
      - 有的模型输入输出价格相同
      - 有的模型输出价格比输入更高（如 GPT-4）
      - 有的模型只对输出计费，或者只对输入计费
+     - 已通过 `input_rate` 和 `output_rate` 分别配置实现
    
 2. **多种计费维度**
    - `cache_read_input_token`：缓存读取的输入 token（如 Claude 的缓存功能）
@@ -320,47 +393,48 @@ graph TD
 
 3. **按模型差异化定价**
 
-   - 不同模型的算力资源消耗差异巨大
-   - 同样消耗 1000 tokens，GPT-4 的成本可能比 GPT-3.5 高 10 倍以上
-   - 如果一个 consumer 的配额同时用于多个模型，无法公平反映真实成本
-   - 无法针对不同模型设置不同的配额策略
+   - ✅ **已支持**：不同模型的算力资源消耗差异巨大
+     - 同样消耗 1000 tokens，GPT-4 的成本可能比 GPT-3.5 高 10 倍以上
+     - 消费者的配额可以同时用于多个模型，通过费用预算控制成本
+     - 可以针对不同模型设置不同的配额策略（通过不同模型组合）
 
    **场景举例**：
    ```
-   Consumer A 配额：100,000 tokens
+   Consumer A 配额：100,000 tokens，费用预算：2.00 元
    
-   场景1：使用 GPT-3.5
-   - 实际成本：$0.20
+   场景1：使用 GPT-3.5（假设费率 input:1.0, output:2.0）
+   - 实际成本：$0.02/token * 1000 = $20.00（美元约为 144 元人民币，不合理）
+   - 假设费率为 1 元/百万token，实际成本：0.002 元
    
-   场景2：使用 GPT-4
-   - 实际成本：$2.00
+   场景2：使用 GPT-4（假设费率 input:30.0, output:60.0）
+   - 实际成本：30 元/百万token * 1000 = 0.03 元
    
-   相同的 token 消耗，成本相差 10 倍
+   不同模型通过不同费率控制成本，通过费用预算统一控制支出
    ```
 
 **改进方案建议**
 
-针对计费模式限制问题，提供以下两种改进方案：
-
 #### 方案一：预算制（按金额计费）
+
+**✅ 已实现**
+
+该方案已在当前版本中实现，支持以下特性：
 
 **核心思路**
 
-每个 Consumer 设置一个总预算（金额），不同模型配置各自的计价规则，使用时根据模型计价规则扣除金额。
+每个 Consumer 同时设置 token 预算和费用预算，不同模型配置各自的计价规则，使用时根据模型计价规则扣除对应的 token 和费用。
 
-**数据模型**
+**已实现的数据模型**
 
 ```yaml
 Consumer 配置：
-  budget: 1000.00              # 预算金额（美元/人民币等）
-  currency: "CNY"             # 货币单位
+  token_budget: 1000000       # token 预算
+  cost_budget: 1000.00        # 费用预算（金额）
 
 模型计价配置：
   gpt-4o:
     input_price_per_1m: 10    # 输入价格：每 100 万 tokens 10 元
     output_price_per_1m: 30   # 输出价格：每 100 万 tokens 30 元
-    cache_read_price_per_1m: 1 # 缓存读取价格
-    image_price_per_image: 0.1 # 图片计价
 
   gpt-3.5-turbo:
     input_price_per_1m: 1
@@ -374,37 +448,40 @@ Consumer 配置：
 **扣除逻辑**
 
 ```
-扣除金额 = (input_tokens × input_price_per_1m ÷ 1000000)
-        + (output_tokens × output_price_per_1m ÷ 1000000)
-        + 其他计费项
+扣除金额 = (input_tokens × input_rate + output_tokens × output_rate) / 1000000
 
-剩余预算 = 当前预算 - 扣除金额
+剩余 token 预算 = 当前 token 预算 - (input_tokens + output_tokens)
+剩余费用预算 = 当前费用预算 - 扣除金额
 ```
 
 Redis Key 设计：
 ```
-consumer_budget:{consumer}        # 剩余预算金额
-consumer_model_history:{consumer} # 使用历史记录（可选）
+{redis_key_prefix}token_budget:{consumer}   # 剩余 token 数量
+{redis_key_prefix}cost_budget:{consumer}    # 剩余费用预算（纳元精度）
+{redis_key_prefix}rate:default              # 默认费率配置
+{redis_key_prefix}rate:model:{provider}:{model}  # 模型费率配置
 ```
 
 **适用场景**
 
-- 多模型统一预算管理
-- 按实际成本控制
-- 需要精确的成本核算
-- 支持复杂计费规则
+- ✅ 多模型统一预算管理
+- ✅ 按实际成本控制
+- ✅ 需要精确的成本核算
+- ✅ 支持复杂计费规则（基础）
 
-**优势**
+**实现的优势**
 
-- 灵活支持各模型的不同计价策略
-- 直接反映真实成本
-- 易于与财务系统集成
+- ✅ 灵活支持各模型的不同计价策略
+- ✅ 直接反映真实成本
+- ✅ 易于与财务系统集成
+- ✅ 采用纳元精度避免浮点误差
+- ✅ 全程整数运算保证精度
 
-**挑战**
+**待完善**
 
-- 需要维护各模型的计价配置
+- 需要支持更多计费维度（cache_read_input_token、image、audio 等）
 - 价格调整时需要同步更新配置
-- 货币汇率处理（如涉及多币种）
+- 多币种支持（如有需要）
 
 #### 方案二：模型配额制（按模型分配）
 

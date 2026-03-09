@@ -174,15 +174,17 @@
 ### 2.3 模型支持验收
 
 #### 验收标准2.3.1：模型识别
-- [ ] 从 OpenAI 请求中正确提取 model 字段
-- [ ] 支持常见模型识别（gpt-4, gpt-3.5-turbo 等）
-- [ ] 支持自定义模型识别
-- [ ] 模型未配置费率时使用默认费率
+- [ ] 从请求中正确提取供应商名称
+- [ ] 从请求体中正确提取 model 字段
+- [ ] 支持常见供应商识别
+- [ ] 支持供应商+模型名称组合查询费率
+- [ ] 供应商+模型名称未配置费率时使用默认费率
 
 #### 验收标准2.3.2：费率加载
-- [ ] 根据模型名称正确加载费率
+- [ ] 根据供应商+模型名称正确加载费率
 - [ ] 费率不存在时使用默认费率（可配置）
 - [ ] 费率解析正确（字符串转浮点数）
+- [ ] 不同供应商的同名模型能正确区分
 
 ### 2.4 精度验收
 
@@ -260,23 +262,24 @@ consumer=example_user&token_budget_delta=50000&cost_budget_delta=10.0
 #### 设置默认费率（setrate）
 ```
 POST /ai/quota/setrate
-model=default&input_rate=10.0&output_rate=30.0
+input_rate=10.0&output_rate=30.0
 ```
 
 #### 设置模型费率（setrate）
 ```
 POST /ai/quota/setrate
-model=gpt-4&input_rate=30.0&output_rate=60.0
+provider=openai&model=gpt-4&input_rate=30.0&output_rate=60.0
 ```
 
 #### 查询默认费率（getrate）
 ```
-GET /ai/quota/getrate?model=default
+GET /ai/quota/getrate
 ```
 
 响应示例：
 ```json
 {
+  "provider": "default",
   "model": "default",
   "input_rate": 10.0,
   "output_rate": 30.0
@@ -285,12 +288,13 @@ GET /ai/quota/getrate?model=default
 
 #### 查询模型费率（getrate）
 ```
-GET /ai/quota/getrate?model=gpt-4
+GET /ai/quota/getrate?provider=openai&model=gpt-4
 ```
 
 响应示例：
 ```json
 {
+  "provider": "openai",
   "model": "gpt-4",
   "input_rate": 30.0,
   "output_rate": 60.0
@@ -307,13 +311,15 @@ GET /ai/quota/getrate?model=gpt-4
 2. 修改请求后扣费逻辑，同时扣除 token 和费用
 3. 修改管理接口（refresh/query/delta），支持双重预算操作
 4. 新增管理接口（setrate/getrate），支持费率设置和查询
-5. 实现模型识别和费率加载逻辑（从 Redis 读取）
-6. 实现费用计算和精度处理
+5. 实现供应商识别和模型识别逻辑（从请求中提取）
+6. 实现费率加载逻辑（按 provider:/{model_name} 从 Redis 读取）
+7. 实现费用计算和精度处理
 
 ### 4.3 注意事项
 1. 费率存储在 Redis 中，全局统一管理
-2. 费率单位为元/百万token，计算时需除以 1,000,000
-3. 费用计算需保证精度，避免浮点数误差
-4. 并发扣费需使用 Redis 事务或 Lua 脚本保证原子性
-5. 模型未配置费率时使用默认费率
-6. 向后兼容：原有接口如果未设置费用预算，仍可正常工作（仅检查 token 预算）
+2. 费率按 `provider:/{model_name}` 组合存储，区分不同供应商的同名模型
+3. 费率单位为元/百万token，计算时需除以 1,000,000
+4. 费用计算需保证精度，避免浮点数误差
+5. 并发扣费需使用 Redis 事务或 Lua 脚本保证原子性
+6. 模型未配置费率时使用默认费率
+7. 向后兼容：原有接口如果未设置费用预算，仍可正常工作（仅检查 token 预算）
