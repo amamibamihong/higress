@@ -24,7 +24,6 @@ func init() {
 		wrapper.ProcessRequestBody(onHttpRequestBody),
 		wrapper.ProcessResponseHeaders(onHttpResponseHeaders),
 		wrapper.ProcessStreamingResponseBody(onHttpStreamingResponseBody),
-		wrapper.ProcessResponseBody(onHttpResponseBody),
 		wrapper.WithRebuildAfterRequests[cfg.PresidioPIIConfig](1000),
 	)
 }
@@ -88,22 +87,12 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config cfg.PresidioPIIConfig
 		}
 	}
 
-	ctx.BufferResponseBody()
-	return types.HeaderStopIteration
+	ctx.DontReadResponseBody()
+	return types.ActionContinue
 }
 
 func onHttpStreamingResponseBody(ctx wrapper.HttpContext, config cfg.PresidioPIIConfig, data []byte, endOfStream bool) []byte {
 	return handler.HandleStreamingResponseBody(ctx, config, data, endOfStream)
-}
-
-func onHttpResponseBody(ctx wrapper.HttpContext, config cfg.PresidioPIIConfig, body []byte) types.Action {
-	shouldCheckResponse := config.CheckResponse && (config.FilterScope == cfg.FilterScopeOutput || config.FilterScope == cfg.FilterScopeBoth)
-	if !shouldCheckResponse {
-		return types.ActionContinue
-	}
-
-	log.Debugf("checking response body for PII...")
-	return handler.HandleResponseBody(ctx, config, body)
 }
 
 func contains(s, substr string) bool {

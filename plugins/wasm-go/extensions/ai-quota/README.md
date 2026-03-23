@@ -192,30 +192,110 @@ graph TD
 | 查询预算 | `/v1/chat/completions/quota?consumer=xxx` | 查询指定 consumer 的 token 和费用预算 |
 | 刷新预算 | `/v1/chat/completions/quota/refresh` | 刷新指定 consumer 的 token 和费用预算 |
 | 增减预算 | `/v1/chat/completions/quota/delta` | 增减指定 consumer 的 token 和费用预算 |
-| 设置费率 | `/v1/chat/completions/quota/setrate` | 设置模型计费费率（默认或指定模型） |
-| 查询费率 | `/v1/chat/completions/quota/getrate` | 查询模型计费费率（默认或指定模型） |
+| 设置费率 | `/v1/chat/completions/quota/setrate` | 设置模型计费费率（必须指定 provider 和 model） |
+| 查询费率 | `/v1/chat/completions/quota/getrate` | 查询模型计费费率（必须指定 provider 和 model） |
 
 ### 数据模型
 
 #### Redis Key 设计
-- **格式**:
-  - `{redis_key_prefix}token_budget:{consumer}` - token 预算
-  - `{redis_key_prefix}cost_budget:{consumer}` - 费用预算
-  - `{redis_key_prefix}rate:default` - 默认费率配置
-  - `{redis_key_prefix}rate:model:{provider}:{model_name}` - 模型费率配置
-- **示例**: `chat_quota:token_budget:consumer1`, `chat_quota:cost_budget:consumer1`, `chat_quota:rate:model:openai:gpt-4`
-- **值类型**:
-  - token_budget：整数
-  - cost_budget：整数（纳元精度，实际值 = 存储值 / 10^9）
-  - rate 配置：JSON 字符串
-- **单位**:
-  - token_budget：token
-  - cost_budget：元（纳元精度存储）
-  - rate：元/百万token（纳元精度存储）
-- **含义**:
-  - token_budget：剩余可用 token 数量
-  - cost_budget：剩余可用金额
-  - rate 配置：模型的输入和输出费率
+
+##### 预算数据结构
+
+**Key 格式**: `{redis_key_prefix}{consumer}`
+
+**数据类型**: Hash
+
+**Fields**:
+- `token_budget`: token 预算（整数）
+- `cost_budget`: 费用预算（整数，纳元精度）
+
+**存储示例**:
+```bash
+# Redis 命令
+HSET chat_quota:consumer1 token_budget 100000 cost_budget 200000000000
+
+# Redis 存储结果
+chat_quota:consumer1 (hash)
+  ├── token_budget: 100000
+  └── cost_budget: 200000000000
+```
+
+**实际含义**:
+- `token_budget: 100000` → 剩余 100,000 tokens
+- `cost_budget: 200000000000` → 剩余 200.00 元（200000000000 / 10^9）
+
+**查询示例**:
+```bash
+# 查询所有字段
+HGETALL chat_quota:consumer1
+# 返回: ["token_budget", "100000", "cost_budget", "200000000000"]
+
+# 查询单个字段
+HGET chat_quota:consumer1 token_budget
+# 返回: "100000"
+
+HGET chat_quota:consumer1 cost_budget
+# 返回: "200000000000"
+```
+
+##### 费率数据结构
+
+**Key 格式**: `{redis_key_prefix}rate:model:{provider}:{model_name}`
+
+**数据类型**: String (JSON)
+
+**JSON 格式**:
+```json
+{
+  "input_rate": 30000000000,
+  "output_rate": 60000000000
+}
+```
+
+**存储示例**:
+```bash
+# Redis 命令
+SET chat_quota:rate:model:openai:gpt-4 '{"input_rate":30000000000,"output_rate":60000000000}'
+
+# Redis 存储结果
+chat_quota:rate:model:openai:gpt-4 (string)
+  └── '{"input_rate":30000000000,"output_rate":60000000000}'
+```
+
+**实际含义**:
+- `input_rate: 30000000000` → 30.00 元/百万token（30000000000 / 10^9）
+- `output_rate: 60000000000` → 60.00 元/百万token（60000000000 / 10^9）
+
+**查询示例**:
+```bash
+# 查询费率
+GET chat_quota:rate:model:openai:gpt-4
+# 返回: '{"input_rate":30000000000,"output_rate":60000000000}'
+```
+
+##### 完整存储格式说明
+
+| Key 类型 | Key 格式 | 数据类型 | 字段/值 | 存储类型 | 实际含义 |
+|---------|---------|---------|---------|---------|---------|
+| 预算 | `{prefix}{consumer}` | Hash | `token_budget` | 整数 | 剩余 token 数量 |
+| 预算 | `{prefix}{consumer}` | Hash | `cost_budget` | 整数 | 剩余金额（纳元精度） |
+| 费率 | `{prefix}rate:model:{provider}:{model}` | String | JSON | JSON 字符串 | 模型输入输出费率（纳元精度） |
+
+##### 精度说明
+
+**纳元精度转换**:
+- 存储值 = 实际值 × 10^9
+- 实际值 = 存储值 / 10^9
+
+**示例**:
+- 实际金额 100.00 元 → 存储值 100000000000
+- 存储值 30000000000 → 实际金额 30.00 元
+- 实际费率 10.5 元/百万token → 存储值 10500000000
+
+**为什么使用纳元精度**:
+- 避免浮点数运算的精度问题
+- 支持小费率（如 0.5 元/百万token）
+- 保证计费计算的准确性
 
 #### 配额检查逻辑
 - token 预算不存在：拒绝请求
@@ -411,122 +491,3 @@ token 扣除数量 = input_tokens + output_tokens
    
    不同模型通过不同费率控制成本，通过费用预算统一控制支出
    ```
-
-**改进方案建议**
-
-#### 方案一：预算制（按金额计费）
-
-**✅ 已实现**
-
-该方案已在当前版本中实现，支持以下特性：
-
-**核心思路**
-
-每个 Consumer 同时设置 token 预算和费用预算，不同模型配置各自的计价规则，使用时根据模型计价规则扣除对应的 token 和费用。
-
-**已实现的数据模型**
-
-```yaml
-Consumer 配置：
-  token_budget: 1000000       # token 预算
-  cost_budget: 1000.00        # 费用预算（金额）
-
-模型计价配置：
-  gpt-4o:
-    input_price_per_1m: 10    # 输入价格：每 100 万 tokens 10 元
-    output_price_per_1m: 30   # 输出价格：每 100 万 tokens 30 元
-
-  gpt-3.5-turbo:
-    input_price_per_1m: 1
-    output_price_per_1m: 2
-
-  glm-4.7:
-    input_price_per_1m: 5
-    output_price_per_1m: 15
-```
-
-**扣除逻辑**
-
-```
-扣除金额 = (input_tokens × input_rate + output_tokens × output_rate) / 1000000
-
-剩余 token 预算 = 当前 token 预算 - (input_tokens + output_tokens)
-剩余费用预算 = 当前费用预算 - 扣除金额
-```
-
-Redis Key 设计：
-```
-{redis_key_prefix}token_budget:{consumer}   # 剩余 token 数量
-{redis_key_prefix}cost_budget:{consumer}    # 剩余费用预算（纳元精度）
-{redis_key_prefix}rate:default              # 默认费率配置
-{redis_key_prefix}rate:model:{provider}:{model}  # 模型费率配置
-```
-
-**适用场景**
-
-- ✅ 多模型统一预算管理
-- ✅ 按实际成本控制
-- ✅ 需要精确的成本核算
-- ✅ 支持复杂计费规则（基础）
-
-**实现的优势**
-
-- ✅ 灵活支持各模型的不同计价策略
-- ✅ 直接反映真实成本
-- ✅ 易于与财务系统集成
-- ✅ 采用纳元精度避免浮点误差
-- ✅ 全程整数运算保证精度
-
-**待完善**
-
-- 需要支持更多计费维度（cache_read_input_token、image、audio 等）
-- 价格调整时需要同步更新配置
-- 多币种支持（如有需要）
-
-#### 方案二：模型配额制（按模型分配）
-
-**核心思路**
-
-为每个模型设置独立的配额，不同模型之间配额相互独立。Consumer 使用某个模型时，只扣除该模型的配额，不影响其他模型。
-
-**数据模型**
-
-```yaml
-Consumer 配置：
-  model_quotas:
-    glm-4.7:
-      input_quota: 1000000    # 100 万 input tokens
-      output_quota: 500000    # 50 万 output tokens
-
-    glm-4.7-flash:
-      input_quota: 10000000   # 1000 万 input tokens
-      output_quota: 5000000   # 500 万 output tokens
-
-    gpt-4o:
-      input_quota: 100000
-      output_quota: 50000
-```
-
-Redis Key 设计：
-
-```
-quota:{consumer}:{model}:input    # 某个模型的 input 配额
-quota:{consumer}:{model}:output   # 某个模型的 output 配额
-```
-
-**检查和扣除逻辑**
-
-```
-请求到达模型 Model_X：
-1. 从 Redis 获取 Model_X 的配额
-2. 检查 input 配额和 output 配额
-3. 任一不足则拒绝请求
-4. 请求完成后，扣除对应的 input 和 output 配额
-```
-
-**适用场景**
-
-- 不同模型有不同的限流策略
-- 免费模型配额多，付费模型配额少
-- 按产品线或业务类型分配模型资源
-- 模型供应商的直接对接场景

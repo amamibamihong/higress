@@ -61,7 +61,8 @@
 - 从请求中提取供应商名称和模型名称
 - 供应商识别：根据请求路由或请求头识别 AI 服务供应商（如 OpenAI、Claude、通义千问等）
 - 模型识别：从请求体中提取模型名称（model 字段）
-- 费率查询优先级：先按 `provider:/{model_name}` 查询，不存在则使用默认费率
+- 费率查询：按 `provider:{model_name}` 查询
+- 如果模型未配置费率，使用零费率（cost=0，仅扣除 token）
 - 支持常见供应商：OpenAI、Claude、通义千问、文心一言等
 
 ### 1.4 配置需求
@@ -73,11 +74,7 @@
 - `precision`：费用精度（默认为 6，支持精确到百万分之一）
 
 #### Redis 数据结构：
-- `{redis_key_prefix}token_budget:{consumer}`：用户的 token 预算（整数）
-- `{redis_key_prefix}cost_budget:{consumer}`：用户的费用预算（浮点数）
-- `{redis_key_prefix}rate:default`：默认费率配置（JSON字符串）
-  - `input_rate`: 输入费率（元/百万token）
-  - `output_rate`: 输出费率（元/百万token）
+- `{redis_key_prefix}{consumer}`：consumer 预算 hash，包含 `token_budget` 和 `cost_budget` 两个 field（整数和浮点数）
 - `{redis_key_prefix}rate:model:{provider}:{model_name}`：模型费率配置（JSON字符串）
   - `provider`: 供应商名称（如 openai、claude 等）
   - `model_name`: 模型名称（如 gpt-4、claude-3-opus 等）
@@ -94,15 +91,16 @@
   - `token_budget_delta`：token 增减量（可选，正数表示增加，负数表示减少）
   - `cost_budget_delta`：费用增减量（可选，正数表示增加，负数表示减少）
 - 设置费率（setrate）：
-  - `provider`：供应商名称（可选，不填表示设置默认费率）
-  - `model`：模型名（可选，不填表示设置默认费率）
+  - `provider`：供应商名称（必填）
+  - `model`：模型名（必填）
   - `input_rate`：输入费率（元/百万token）
   - `output_rate`：输出费率（元/百万token）
-  - 注意：`provider` 和 `model` 都不填时设置默认费率，都填时设置指定供应商的模型费率
+  - 注意：`provider` 和 `model` 必须同时填写，设置指定供应商的模型费率
 - 查询费率（getrate）：
-  - `provider`：供应商名称（可选，不填表示查询默认费率）
-  - `model`：模型名（可选，不填表示查询默认费率）
+  - `provider`：供应商名称（必填）
+  - `model`：模型名（必填）
   - 返回 `provider`、`model`、`input_rate`、`output_rate` 字段
+  - 注意：`provider` 和 `model` 必须同时填写，查询指定供应商的模型费率
 
 ## 二、验收标准
 
@@ -164,12 +162,11 @@
 - [ ] 参数验证正确
 
 #### 验收标准2.2.4：设置和查询费率（setrate/getrate）
-- [ ] 支持设置默认费率
 - [ ] 支持设置模型费率
-- [ ] 支持查询默认费率
 - [ ] 支持查询模型费率
 - [ ] 费率正确存储在 Redis 中
 - [ ] 费率正确从 Redis 中读取
+- [ ] provider 和 model 必须同时填写
 
 ### 2.3 模型支持验收
 
@@ -178,11 +175,11 @@
 - [ ] 从请求体中正确提取 model 字段
 - [ ] 支持常见供应商识别
 - [ ] 支持供应商+模型名称组合查询费率
-- [ ] 供应商+模型名称未配置费率时使用默认费率
+- [ ] 供应商+模型名称未配置费率时使用零费率
 
 #### 验收标准2.3.2：费率加载
 - [ ] 根据供应商+模型名称正确加载费率
-- [ ] 费率不存在时使用默认费率（可配置）
+- [ ] 费率不存在时使用零费率
 - [ ] 费率解析正确（字符串转浮点数）
 - [ ] 不同供应商的同名模型能正确区分
 
@@ -259,31 +256,10 @@ POST /ai/quota/delta
 consumer=example_user&token_budget_delta=50000&cost_budget_delta=10.0
 ```
 
-#### 设置默认费率（setrate）
-```
-POST /ai/quota/setrate
-input_rate=10.0&output_rate=30.0
-```
-
 #### 设置模型费率（setrate）
 ```
 POST /ai/quota/setrate
 provider=openai&model=gpt-4&input_rate=30.0&output_rate=60.0
-```
-
-#### 查询默认费率（getrate）
-```
-GET /ai/quota/getrate
-```
-
-响应示例：
-```json
-{
-  "provider": "default",
-  "model": "default",
-  "input_rate": 10.0,
-  "output_rate": 30.0
-}
 ```
 
 #### 查询模型费率（getrate）
@@ -317,9 +293,9 @@ GET /ai/quota/getrate?provider=openai&model=gpt-4
 
 ### 4.3 注意事项
 1. 费率存储在 Redis 中，全局统一管理
-2. 费率按 `provider:/{model_name}` 组合存储，区分不同供应商的同名模型
+2. 费率按 `provider:{model_name}` 组合存储，区分不同供应商的同名模型
 3. 费率单位为元/百万token，计算时需除以 1,000,000
 4. 费用计算需保证精度，避免浮点数误差
 5. 并发扣费需使用 Redis 事务或 Lua 脚本保证原子性
-6. 模型未配置费率时使用默认费率
+6. 模型未配置费率时使用零费率（cost=0，仅扣除 token）
 7. 向后兼容：原有接口如果未设置费用预算，仍可正常工作（仅检查 token 预算）

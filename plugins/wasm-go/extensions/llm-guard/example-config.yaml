@@ -1,0 +1,35 @@
+# LLM Guard Wasm 插件示例配置
+
+serviceName: llm-guard.dns
+servicePort: 8000
+serviceHost: llm-guard.example.com
+
+# 如果使用 IP 地址（固定地址类型服务），请使用以下配置：
+# serviceName: llm-guard.static
+# servicePort: 80
+# serviceHost: 192.168.1.100
+
+# 匹配范围：input（仅请求）、output（仅响应）、both（两者都检测）
+checkRequest: true
+checkResponse: false
+scope: input
+
+# 默认操作：MASK（替换）、BLOCK（阻断）
+# MASK 模式：调用 /analyze/prompt 替换内容
+# BLOCK 模式：调用 /scan/prompt 阻断检测
+defaultAction: MASK
+
+# 阻断响应配置
+denyCode: 200
+denyMessage: "内容包含风险，已被拦截"
+
+# 超时设置（毫秒）
+timeout: 5000
+
+# LLM Guard 端点配置（可选，使用默认值）
+endpointAnalyzePrompt: "/analyze/prompt"
+endpointScanPrompt: "/scan/prompt"
+
+# 内容提取路径配置（可选，使用默认值）
+requestJsonPath: "messages.@reverse.0.content"
+responseJsonPath: "choices.0.message.content"

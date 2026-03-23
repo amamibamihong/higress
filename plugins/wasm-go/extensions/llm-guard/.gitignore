@@ -1,0 +1,22 @@
+# Build output
+*.wasm
+*.o
+
+# Go specific
+vendor/
+go.sum
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Test coverage
+coverage.out
+*.cover
