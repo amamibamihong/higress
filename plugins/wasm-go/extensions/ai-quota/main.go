@@ -56,12 +56,13 @@ func init() {
 }
 
 type QuotaConfig struct {
-	redisInfo       RedisInfo         `yaml:"redis"`
-	RedisKeyPrefix  string            `yaml:"redis_key_prefix"`
-	AdminConsumer   string            `yaml:"admin_consumer"`
-	AdminPath       string            `yaml:"admin_path"`
-	Precision       int               `yaml:"precision"`
-	credential2Name map[string]string `yaml:"-"`
+	redisInfo       RedisInfo           `yaml:"redis"`
+	RedisKeyPrefix  string              `yaml:"redis_key_prefix"`
+	AdminConsumer   string              `yaml:"admin_consumer"`
+	AdminPath       string              `yaml:"admin_path"`
+	Precision       int                 `yaml:"precision"`
+	SuperConsumers  map[string]struct{} `yaml:"super_consumers"`
+	credential2Name map[string]string   `yaml:"-"`
 	redisClient     wrapper.RedisClient
 }
 
@@ -137,6 +138,12 @@ func parseConfig(json gjson.Result, config *QuotaConfig) error {
 	}
 	config.Precision = int(precision)
 
+	// super consumers configuration
+	config.SuperConsumers = make(map[string]struct{})
+	for _, item := range json.Get("super_consumers").Array() {
+		config.SuperConsumers[item.String()] = struct{}{}
+	}
+
 	config.redisClient = wrapper.NewRedisClusterClient(wrapper.FQDNCluster{
 		FQDN: serviceName,
 		Port: int64(servicePort),
@@ -164,6 +171,14 @@ func onHttpRequestHeaders(context wrapper.HttpContext, config QuotaConfig) types
 	context.SetContext("adminMode", adminMode)
 	context.SetContext("consumer", consumer)
 	log.Debugf("chatMode:%s, adminMode:%s, consumer:%s", chatMode, adminMode, consumer)
+
+	// Check static super user whitelist
+	if _, ok := config.SuperConsumers[consumer]; ok {
+		log.Infof("consumer:%s is a super user (static whitelist), skip quota check", consumer)
+		context.SetContext("isSuperUser", true)
+		return types.ActionContinue
+	}
+
 	if chatMode == ChatModeNone {
 		return types.ActionContinue
 	}
@@ -190,14 +205,22 @@ func onHttpRequestHeaders(context wrapper.HttpContext, config QuotaConfig) types
 	// We'll update rate in onHttpRequestBody after parsing model from request body
 	budgetKey := config.RedisKeyPrefix + consumer
 
-	// Check both token and cost budgets using HMGet
-	config.redisClient.HMGet(budgetKey, []string{"token_budget", "cost_budget"}, func(response resp.Value) {
+	// Check both token and cost budgets using HMGet, and also check is_super field
+	config.redisClient.HMGet(budgetKey, []string{"token_budget", "cost_budget", "is_super"}, func(response resp.Value) {
 		if err := response.Error(); err != nil {
 			util.SendResponse(http.StatusServiceUnavailable, "ai-quota.error", "text/plain", fmt.Sprintf("redis hmget error:%v", err))
 			return
 		}
 
 		elements := response.Array()
+		// Check dynamic super user flag in Redis
+		if len(elements) >= 3 && !elements[2].IsNull() && elements[2].String() == "1" {
+			log.Infof("consumer:%s is a super user (dynamic redis), skip quota check", consumer)
+			context.SetContext("isSuperUser", true)
+			proxywasm.ResumeHttpRequest()
+			return
+		}
+
 		tokenBudget := 0
 		costBudget := 0
 
@@ -400,6 +423,13 @@ func processDeduction(ctx wrapper.HttpContext, config QuotaConfig, consumer stri
 }
 
 func onHttpStreamingResponseBody(ctx wrapper.HttpContext, config QuotaConfig, data []byte, endOfStream bool) []byte {
+	// Skip for super users
+	isSuper, _ := ctx.GetContext("isSuperUser").(bool)
+	if isSuper {
+		log.Debugf("super user, skip token usage extraction and quota deduction")
+		return data
+	}
+
 	chatMode, ok := ctx.GetContext("chatMode").(ChatMode)
 	if !ok {
 		return data
@@ -693,13 +723,31 @@ func refreshQuota(ctx wrapper.HttpContext, config QuotaConfig, adminConsumer str
 		}
 	}
 
-	if !tokenBudgetSet && !costBudgetSet {
+	// Parse is_super if provided
+	isSuper := ""
+	isSuperSet := false
+	if isSuperStr := values["is_super"]; isSuperStr != "" {
+		log.Debugf("[refreshQuota] Parsing is_super: %s", isSuperStr)
+		if isSuperStr == "1" || isSuperStr == "true" {
+			isSuper = "1"
+			isSuperSet = true
+		} else if isSuperStr == "0" || isSuperStr == "false" {
+			isSuper = "0"
+			isSuperSet = true
+		} else {
+			log.Debugf("[refreshQuota] Invalid is_super format: %s", isSuperStr)
+			util.SendResponse(http.StatusForbidden, "ai-quota.unauthorized", "text/plain", "Request denied by ai quota check. is_super must be 1/0 or true/false.")
+			return types.ActionContinue
+		}
+	}
+
+	if !tokenBudgetSet && !costBudgetSet && !isSuperSet {
 		log.Debugf("[refreshQuota] No budget parameters set")
-		util.SendResponse(http.StatusForbidden, "ai-quota.unauthorized", "text/plain", "Request denied by ai quota check. token_budget or cost_budget must be set.")
+		util.SendResponse(http.StatusForbidden, "ai-quota.unauthorized", "text/plain", "Request denied by ai quota check. token_budget, cost_budget or is_super must be set.")
 		return types.ActionContinue
 	}
 
-	// Use hash structure: key=prefix+consumer, fields=token_budget,cost_budget
+	// Use hash structure: key=prefix+consumer, fields=token_budget,cost_budget,is_super
 	budgetKey := config.RedisKeyPrefix + queryConsumer
 	log.Debugf("[refreshQuota] Using hash key=%s", budgetKey)
 
@@ -712,6 +760,10 @@ func refreshQuota(ctx wrapper.HttpContext, config QuotaConfig, adminConsumer str
 	if costBudgetSet {
 		kvMap["cost_budget"] = int(costBudget)
 		log.Debugf("[refreshQuota] Adding cost_budget=%d to hash", costBudget)
+	}
+	if isSuperSet {
+		kvMap["is_super"] = isSuper
+		log.Debugf("[refreshQuota] Adding is_super=%s to hash", isSuper)
 	}
 
 	// Use HMSet for batch operation
@@ -730,6 +782,9 @@ func refreshQuota(ctx wrapper.HttpContext, config QuotaConfig, adminConsumer str
 		if costBudgetSet {
 			costValue := integerToCost(costBudget, config.Precision)
 			log.Debugf("set cost_budget:%.9f for consumer:%s", costValue, queryConsumer)
+		}
+		if isSuperSet {
+			log.Debugf("set is_super:%s for consumer:%s", isSuper, queryConsumer)
 		}
 		log.Debugf("[refreshQuota] HMSet success, sending response")
 		util.SendResponse(http.StatusOK, "ai-quota.refreshbudget", "text/plain", "refresh budget successful")
@@ -763,13 +818,13 @@ func queryQuota(ctx wrapper.HttpContext, config QuotaConfig, adminConsumer strin
 	}
 	queryConsumer := values["consumer"]
 
-	// Use hash structure: key=prefix+consumer, fields=token_budget,cost_budget
+	// Use hash structure: key=prefix+consumer, fields=token_budget,cost_budget,is_super
 	budgetKey := config.RedisKeyPrefix + queryConsumer
 	log.Debugf("[queryQuota] Using hash key=%s", budgetKey)
 
 	// Use HMGet for batch operation
 	log.Debugf("[queryQuota] Calling HMGet for hash key=%s", budgetKey)
-	err := config.redisClient.HMGet(budgetKey, []string{"token_budget", "cost_budget"}, func(response resp.Value) {
+	err := config.redisClient.HMGet(budgetKey, []string{"token_budget", "cost_budget", "is_super"}, func(response resp.Value) {
 		log.Debugf("[queryQuota] HMGet callback started")
 		if err := response.Error(); err != nil {
 			log.Debugf("[queryQuota] HMGet error: %v", err)
@@ -780,6 +835,7 @@ func queryQuota(ctx wrapper.HttpContext, config QuotaConfig, adminConsumer strin
 		// Parse HMGet response - response is an array
 		tokenBudget := 0
 		costBudget := 0
+		isSuper := false
 
 		elements := response.Array()
 		if len(elements) >= 1 && !elements[0].IsNull() {
@@ -790,15 +846,29 @@ func queryQuota(ctx wrapper.HttpContext, config QuotaConfig, adminConsumer strin
 			costBudget = elements[1].Integer()
 			log.Debugf("[queryQuota] Cost budget from HMGet: %d", costBudget)
 		}
+		if len(elements) >= 3 && !elements[2].IsNull() {
+			isSuper = elements[2].String() == "1"
+			log.Debugf("[queryQuota] Is super user from HMGet: %v", isSuper)
+		}
+
+		// Check static config as well
+		if !isSuper {
+			if _, ok := config.SuperConsumers[queryConsumer]; ok {
+				isSuper = true
+				log.Debugf("[queryQuota] Is super user from static config: %v", isSuper)
+			}
+		}
 
 		result := struct {
 			Consumer    string  `json:"consumer"`
 			TokenBudget int     `json:"token_budget"`
 			CostBudget  float64 `json:"cost_budget"`
+			IsSuper     bool    `json:"is_super"`
 		}{
 			Consumer:    queryConsumer,
 			TokenBudget: tokenBudget,
 			CostBudget:  integerToCost(int64(costBudget), config.Precision),
+			IsSuper:     isSuper,
 		}
 		body, _ := json.Marshal(result)
 		log.Debugf("[queryQuota] Sending response: %s", string(body))

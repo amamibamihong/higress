@@ -23,6 +23,7 @@ description: AI 配额管理插件配置参考
 | `admin_consumer`   | string          | 必填                                   |      | 管理 quota 管理身份的 consumer 名称                 |
 | `admin_path`       | string          | 选填                                   |   /quota   | 管理 quota 请求 path 前缀                        |
 | `precision`        | int             | 选填                                   |   9   | 金额精度，默认为 9（纳元级别）                         |
+| `super_consumers`  | array of string | 选填                                   |   []  | 超级用户列表，超级用户不受配额和费用限制               |
 | `redis`            | object          | 是                                    |      | redis相关配置                                  |
 
 `redis`中每一项的配置字段说明
@@ -39,17 +40,38 @@ description: AI 配额管理插件配置参考
 
 ## 配置示例
 
-### 识别请求参数 apikey，进行区别限流
+### 识别请求参数 apikey，进行区别限流，并设置超级用户
 ```yaml
 redis_key_prefix: "chat_quota:"
 admin_consumer: consumer3
 admin_path: /quota
+super_consumers:
+  - vip_user_1
+  - super_admin
 redis:
   service_name: redis-service.default.svc.cluster.local
   service_port: 6379
   timeout: 2000
 ```
 
+
+###  超级用户功能
+
+超级用户不受任何配额（token）和费用（cost）限制，且其使用量不会从 Redis 中扣除。
+
+支持两种配置方式：
+1. **静态配置**：在插件配置的 `super_consumers` 列表中添加对应的 consumer 名称。
+2. **动态配置**：在 Redis 的 consumer hash 结构中设置 `is_super` 字段为 `"1"`。
+
+**Redis 动态设置示例**:
+```bash
+# 假设 redis_key_prefix 为 "chat_quota:"
+# 将 consumer1 设置为超级用户
+HSET chat_quota:consumer1 is_super 1
+
+# 取消 consumer1 的超级用户身份
+HDEL chat_quota:consumer1 is_super
+```
 
 ###  刷新预算
 

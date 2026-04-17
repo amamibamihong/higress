@@ -33,11 +33,11 @@ func (h *LLMGuardHandler) GenerateRandomChatID() string {
 func HandleRequestBody(ctx wrapper.HttpContext, config cfg.LLMGuardConfig, body []byte) types.Action {
 	content := gjson.GetBytes(body, config.RequestJsonPath).String()
 
-	log.Debugf("Raw request content for LLM Guard check: %s", content)
 	if len(content) == 0 {
-		log.Info("request content is empty, skip LLM Guard check")
+		log.Warnf("Extracted request content is empty using path: %s. Skip LLM Guard check.", config.RequestJsonPath)
 		return types.ActionContinue
 	}
+	log.Debugf("Raw request content for LLM Guard check: %s", content)
 
 	startTime := time.Now().UnixMilli()
 
@@ -62,16 +62,22 @@ func (h *LLMGuardHandler) handleMaskMode(ctx wrapper.HttpContext, config cfg.LLM
 			return
 		}
 
-		var analyzeResp cfg.AnalyzePromptResponse
-		err := json.Unmarshal(responseBody, &analyzeResp)
-		if err != nil {
-			log.Errorf("Failed to unmarshal LLM Guard analyze response: %v", err)
-			proxywasm.ResumeHttpRequest()
-			return
+		res := gjson.ParseBytes(responseBody)
+		isValid := true
+		if val := res.Get("is_valid"); val.Exists() {
+			isValid = val.Bool()
 		}
 
-		if !analyzeResp.IsValid {
-			h.replaceRequestContent(ctx, config, body, analyzeResp.SanitizedPrompt, analyzeResp.Scanners, startTime)
+		if !isValid {
+			sanitizedPrompt := res.Get("sanitized_prompt").String()
+			scanners := make(map[string]float64)
+			if s := res.Get("scanners"); s.IsObject() {
+				s.ForEach(func(k, v gjson.Result) bool {
+					scanners[k.String()] = v.Float()
+					return true
+				})
+			}
+			h.replaceRequestContent(ctx, config, body, sanitizedPrompt, scanners, startTime)
 			return
 		}
 
@@ -110,16 +116,21 @@ func (h *LLMGuardHandler) handleBlockMode(ctx wrapper.HttpContext, config cfg.LL
 			return
 		}
 
-		var scanResp cfg.ScanPromptResponse
-		err := json.Unmarshal(responseBody, &scanResp)
-		if err != nil {
-			log.Errorf("Failed to unmarshal LLM Guard scan response: %v", err)
-			proxywasm.ResumeHttpRequest()
-			return
+		res := gjson.ParseBytes(responseBody)
+		isValid := true
+		if val := res.Get("is_valid"); val.Exists() {
+			isValid = val.Bool()
 		}
 
-		if scanResp.IsValid {
-			h.sendDenyResponse(ctx, config, scanResp.Scanners, startTime)
+		if !isValid {
+			scanners := make(map[string]float64)
+			if s := res.Get("scanners"); s.IsObject() {
+				s.ForEach(func(k, v gjson.Result) bool {
+					scanners[k.String()] = v.Float()
+					return true
+				})
+			}
+			h.sendDenyResponse(ctx, config, scanners, startTime)
 			return
 		}
 
