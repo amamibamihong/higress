@@ -51,6 +51,7 @@ super_consumers:
 redis:
   service_name: redis-service.default.svc.cluster.local
   service_port: 6379
+  password: myredissecret
   timeout: 2000
 ```
 

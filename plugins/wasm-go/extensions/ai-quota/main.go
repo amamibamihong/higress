@@ -156,40 +156,38 @@ func onHttpRequestHeaders(context wrapper.HttpContext, config QuotaConfig) types
 	context.DisableReroute()
 	log.Debugf("onHttpRequestHeaders()")
 	// get tokens
-	consumer, err := proxywasm.GetHttpRequestHeader("x-mse-consumer")
-	if err != nil {
-		return deniedNoKeyAuthData()
-	}
-	if consumer == "" {
-		return deniedUnauthorizedConsumer()
-	}
-
+	consumer, _ := proxywasm.GetHttpRequestHeader("x-mse-consumer")
 	rawPath := context.Path()
 	path, _ := url.Parse(rawPath)
 	chatMode, adminMode := getOperationMode(path.Path, config.AdminPath)
 	context.SetContext("chatMode", chatMode)
 	context.SetContext("adminMode", adminMode)
-	context.SetContext("consumer", consumer)
-	log.Debugf("chatMode:%s, adminMode:%s, consumer:%s", chatMode, adminMode, consumer)
-
-	// Check static super user whitelist
-	if _, ok := config.SuperConsumers[consumer]; ok {
-		log.Infof("consumer:%s is a super user (static whitelist), skip quota check", consumer)
-		context.SetContext("isSuperUser", true)
-		return types.ActionContinue
+	if consumer != "" {
+		context.SetContext("consumer", consumer)
+		// Check static super user whitelist
+		if _, ok := config.SuperConsumers[consumer]; ok {
+			log.Debugf("consumer:%s is a super user (static whitelist), skip quota check", consumer)
+			context.SetContext("isSuperUser", true)
+		}
 	}
+
+	log.Debugf("chatMode:%s, adminMode:%s, consumer:%s", chatMode, adminMode, consumer)
 
 	if chatMode == ChatModeNone {
 		return types.ActionContinue
 	}
 	if chatMode == ChatModeAdmin {
-		// query quota
-		if adminMode == AdminModeQuery {
-			return queryQuota(context, config, consumer, path)
-		}
-		if adminMode == AdminModeRefresh || adminMode == AdminModeDelta {
+		// Buffer request body for all admin operations that need it
+		if adminMode == AdminModeRefresh || adminMode == AdminModeDelta || adminMode == AdminModeSetRate || adminMode == AdminModeGetRate {
 			context.BufferRequestBody()
 			return types.HeaderStopIteration
+		}
+		// query quota
+		if adminMode == AdminModeQuery {
+			if consumer == "" {
+				return deniedNoKeyAuthData()
+			}
+			return queryQuota(context, config, consumer, path)
 		}
 		return types.ActionContinue
 	}
@@ -201,78 +199,33 @@ func onHttpRequestHeaders(context wrapper.HttpContext, config QuotaConfig) types
 	provider := getProviderFromRequest(context)
 	context.SetContext("provider", provider)
 
-	// Check dual quota here using hash structure (before we have model name)
-	// We'll update rate in onHttpRequestBody after parsing model from request body
-	budgetKey := config.RedisKeyPrefix + consumer
-
-	// Check both token and cost budgets using HMGet, and also check is_super field
-	config.redisClient.HMGet(budgetKey, []string{"token_budget", "cost_budget", "is_super"}, func(response resp.Value) {
-		if err := response.Error(); err != nil {
-			util.SendResponse(http.StatusServiceUnavailable, "ai-quota.error", "text/plain", fmt.Sprintf("redis hmget error:%v", err))
-			return
-		}
-
-		elements := response.Array()
-		// Check dynamic super user flag in Redis
-		if len(elements) >= 3 && !elements[2].IsNull() && elements[2].String() == "1" {
-			log.Infof("consumer:%s is a super user (dynamic redis), skip quota check", consumer)
-			context.SetContext("isSuperUser", true)
-			proxywasm.ResumeHttpRequest()
-			return
-		}
-
-		tokenBudget := 0
-		costBudget := 0
-
-		if len(elements) >= 1 && !elements[0].IsNull() {
-			tokenBudget = elements[0].Integer()
-		}
-		if len(elements) >= 2 && !elements[1].IsNull() {
-			costBudget = elements[1].Integer()
-		}
-
-		// Check token budget
-		if tokenBudget <= 0 {
-			util.SendResponse(http.StatusForbidden, "ai-quota.notokenleft", "text/plain", "Request denied by ai quota check, No token left")
-			return
-		}
-
-		// Check cost budget
-		if costBudget <= 0 {
-			util.SendResponse(http.StatusForbidden, "ai-quota.nocostleft", "text/plain", "Request denied by ai quota check, No cost left")
-			return
-		}
-
-		costValue := integerToCost(int64(costBudget), config.Precision)
-		log.Debugf("consumer:%s tokenBudget:%d costBudget:%.9f (initial check)", consumer, tokenBudget, costValue)
-
-		// Store initial budget for later use
-		context.SetContext("initialTokenBudget", tokenBudget)
-		context.SetContext("initialCostBudget", costBudget)
-
-		proxywasm.ResumeHttpRequest()
-	})
-	return types.HeaderStopAllIterationAndWatermark
+	return types.ActionContinue
 }
 
 func onHttpRequestBody(ctx wrapper.HttpContext, config QuotaConfig, body []byte) types.Action {
 	log.Debugf("onHttpRequestBody()")
-	chatMode, ok := ctx.GetContext("chatMode").(ChatMode)
-	if !ok {
+	chatModeVal := ctx.GetContext("chatMode")
+	if chatModeVal == nil {
 		return types.ActionContinue
 	}
+	chatMode := chatModeVal.(ChatMode)
+
 	if chatMode == ChatModeNone {
 		return types.ActionContinue
 	}
+
 	if chatMode == ChatModeAdmin {
-		adminMode, ok := ctx.GetContext("adminMode").(AdminMode)
-		if !ok {
+		adminModeVal := ctx.GetContext("adminMode")
+		if adminModeVal == nil {
 			return types.ActionContinue
 		}
-		adminConsumer, ok := ctx.GetContext("consumer").(string)
-		if !ok {
-			return types.ActionContinue
+		adminMode := adminModeVal.(AdminMode)
+
+		consumerVal := ctx.GetContext("consumer")
+		if consumerVal == nil {
+			return deniedNoKeyAuthData()
 		}
+		adminConsumer := consumerVal.(string)
 
 		if adminMode == AdminModeRefresh {
 			return refreshQuota(ctx, config, adminConsumer, string(body))
@@ -286,7 +239,6 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config QuotaConfig, body []byte)
 		if adminMode == AdminModeGetRate {
 			return getRate(ctx, config, adminConsumer, string(body))
 		}
-
 		return types.ActionContinue
 	}
 
@@ -322,17 +274,47 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config QuotaConfig, body []byte)
 
 			ctx.SetContext("modelRate", rate)
 
+			// If rate is 0, it's a free model. Skip authentication and quota check.
+			if rate.InputRate == 0 && rate.OutputRate == 0 {
+				log.Debugf("free model detected (zero rate): %s, skip auth and quota check", modelName)
+				ctx.SetContext("isFreeModel", true)
+				proxywasm.ResumeHttpRequest()
+				return
+			}
+
+			// For paid models, authentication is required
+			consumerVal := ctx.GetContext("consumer")
+			if consumerVal == nil {
+				deniedNoKeyAuthData()
+				return
+			}
+			consumer := consumerVal.(string)
+
+			// If it's already a static super user, skip Redis check
+			if isSuper, _ := ctx.GetContext("isSuperUser").(bool); isSuper {
+				log.Debugf("consumer:%s is a static super user, skip Redis quota check", consumer)
+				proxywasm.ResumeHttpRequest()
+				return
+			}
+
 			// Update budget check with the actual rate
-			consumer := ctx.GetContext("consumer").(string)
 			budgetKey := config.RedisKeyPrefix + consumer
 
-			config.redisClient.HMGet(budgetKey, []string{"token_budget", "cost_budget"}, func(response resp.Value) {
+			config.redisClient.HMGet(budgetKey, []string{"token_budget", "cost_budget", "is_super"}, func(response resp.Value) {
 				if err := response.Error(); err != nil {
 					util.SendResponse(http.StatusServiceUnavailable, "ai-quota.error", "text/plain", fmt.Sprintf("redis hmget error:%v", err))
 					return
 				}
 
 				elements := response.Array()
+				// Check dynamic super user flag in Redis
+				if len(elements) >= 3 && !elements[2].IsNull() && elements[2].String() == "1" {
+					log.Debugf("consumer:%s is a dynamic super user, skip quota check", consumer)
+					ctx.SetContext("isSuperUser", true)
+					proxywasm.ResumeHttpRequest()
+					return
+				}
+
 				tokenBudget := 0
 				costBudget := 0
 
@@ -355,6 +337,11 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config QuotaConfig, body []byte)
 
 				costValue := integerToCost(int64(costBudget), config.Precision)
 				log.Debugf("onHttpRequestBody: consumer:%s tokenBudget:%d costBudget:%.9f (after model parsed)", consumer, tokenBudget, costValue)
+
+				// Store initial budget for later use
+				ctx.SetContext("initialTokenBudget", tokenBudget)
+				ctx.SetContext("initialCostBudget", costBudget)
+
 				proxywasm.ResumeHttpRequest()
 			})
 		})
@@ -367,6 +354,12 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config QuotaConfig, body []byte)
 // processDeduction handles the cost deduction after rate is retrieved
 // Uses hash structure: key=prefix+consumer, fields=token_budget,cost_budget
 func processDeduction(ctx wrapper.HttpContext, config QuotaConfig, consumer string, inputToken, outputToken int64, modelName, provider string, rate ModelRate, data []byte) []byte {
+	if rate.InputRate == 0 && rate.OutputRate == 0 {
+		log.Debugf("free model detected (zero rate): %s, skip quota deduction", modelName)
+		proxywasm.ResumeHttpResponse()
+		return data
+	}
+
 	totalCost := calculateCost(inputToken, outputToken, rate)
 
 	totalToken := int(inputToken + outputToken)
@@ -430,6 +423,16 @@ func onHttpStreamingResponseBody(ctx wrapper.HttpContext, config QuotaConfig, da
 		return data
 	}
 
+	// Get model rate from context
+	rateVal := ctx.GetContext("modelRate")
+	if rateVal != nil {
+		rate := rateVal.(ModelRate)
+		if rate.InputRate == 0 && rate.OutputRate == 0 {
+			// 对于免费模型，彻底不进行任何后续操作，直接返回原始数据
+			return data
+		}
+	}
+
 	chatMode, ok := ctx.GetContext("chatMode").(ChatMode)
 	if !ok {
 		return data
@@ -471,12 +474,8 @@ func onHttpStreamingResponseBody(ctx wrapper.HttpContext, config QuotaConfig, da
 	// Get provider
 	provider := getProviderFromRequest(ctx)
 
-	// Get model rate from context (already fetched in onHttpRequestHeaders)
-	rate := ctx.GetContext("modelRate").(ModelRate)
-
-	log.Debugf("onHttpStreamingResponseBody: got rate from context: %+v", rate)
-
-	// Process deduction with rate from context
+	// Process deduction with rate from context (already verified at the start)
+	rate := rateVal.(ModelRate)
 	processDeduction(ctx, config, consumer, inputToken, outputToken, modelName, provider, rate, data)
 
 	return data
