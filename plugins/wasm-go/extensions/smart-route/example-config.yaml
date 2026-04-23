@@ -1,0 +1,26 @@
+# Smart Route 插件配置示例
+
+# 业务定义的路由器 ID (必填)
+# 对应 LLM_SMART_ROUTE_API 中的 router_id 字段
+routerID: "platform_test"
+
+# 目标路由服务在 Higress 中对应的服务名称 (必填)
+# 例如 K8s Service 的 FQDN: "llm-router-service.default.svc.cluster.local"
+serviceName: "llm-router-service.default.svc.cluster.local"
+
+# 目标路由服务的端口 (选填，默认为 80)
+servicePort: 80
+
+# 发起请求时的 Host 请求头 (选填，默认为 serviceName)
+# 对应 :authority 伪头部，确保后端服务能识别目标域名
+serviceHost: "llm-router.example.com"
+
+# 智能路由接口的请求路径 (选填，默认为 /v1/smart-route)
+servicePath: "/v1/smart-route"
+
+# 提取 Prompt 的 JSON 路径 (选填)
+# 默认为 OpenAI 聊天格式的最后一条消息
+requestJsonPath: "messages.@reverse.0.content"
+
+# 调用路由 API 的超时时间 (选填，单位毫秒，默认为 5000)
+timeout: 3000
