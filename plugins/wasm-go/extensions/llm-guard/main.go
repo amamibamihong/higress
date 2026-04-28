@@ -30,23 +30,10 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config cfg.LLMGuardConfig) ty
 	consumer, _ := proxywasm.GetHttpRequestHeader("x-mse-consumer")
 	ctx.SetContext("consumer", consumer)
 	ctx.DisableReroute()
-
-	shouldCheckRequest := config.CheckRequest && (config.Scope == cfg.ScopeInput || config.Scope == cfg.ScopeBoth)
-	if !shouldCheckRequest {
-		log.Debugf("request LLM Guard checking is disabled or scope does not include input")
-		ctx.DontReadRequestBody()
-		return types.ActionContinue
-	}
-
 	return types.ActionContinue
 }
 
 func onHttpRequestBody(ctx wrapper.HttpContext, config cfg.LLMGuardConfig, body []byte) types.Action {
-	shouldCheckRequest := config.CheckRequest && (config.Scope == cfg.ScopeInput || config.Scope == cfg.ScopeBoth)
-	if !shouldCheckRequest {
-		return types.ActionContinue
-	}
-
 	log.Debugf("checking request body for LLM Guard...")
 	return handler.HandleRequestBody(ctx, config, body)
 }

@@ -9,14 +9,8 @@ serviceHost: llm-guard.example.com
 # servicePort: 80
 # serviceHost: 192.168.1.100
 
-# 匹配范围：input（仅请求）、output（仅响应）、both（两者都检测）
-checkRequest: true
-checkResponse: false
-scope: input
-
 # 默认操作：MASK（替换）、BLOCK（阻断）
-# MASK 模式：调用 /analyze/prompt 替换内容
-# BLOCK 模式：调用 /scan/prompt 阻断检测
+# 只要任何一个被触发的扫描项标记为 BLOCK，则执行阻断；否则如果有项标记为 MASK，则执行内容替换。
 defaultAction: MASK
 
 # 阻断响应配置
@@ -28,8 +22,35 @@ timeout: 5000
 
 # LLM Guard 端点配置（可选，使用默认值）
 endpointAnalyzePrompt: "/analyze/prompt"
-endpointScanPrompt: "/scan/prompt"
 
 # 内容提取路径配置（可选，使用默认值）
 requestJsonPath: "messages.@reverse.0.content"
 responseJsonPath: "choices.0.message.content"
+
+# Scanners 配置
+# 每个 scanner 可以单独配置 action。
+# 对于 Anonymize scanner，还可以进一步配置 entities 的 action。
+scanners:
+  - name: SensitiveWords
+    action: BLOCK
+  - name: Anonymize
+    action: MASK
+    entities:
+      - entityType: PHONE_NUMBER_ZH
+        action: BLOCK
+      - entityType: EMAIL_ADDRESS
+        action: MASK
+      - entityType: ID_CARD_ZH
+        action: BLOCK
+      - entityType: BANK_CARD_ZH
+        action: BLOCK
+      - entityType: PASSPORT_ZH
+        action: BLOCK
+      - entityType: LOCATION
+        action: MASK
+      - entityType: PERSON
+        action: MASK
+      - entityType: ORGANIZATION
+        action: MASK
+      - entityType: IP_ADDRESS
+        action: MASK

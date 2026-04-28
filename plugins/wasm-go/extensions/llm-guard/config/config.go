@@ -30,6 +30,17 @@ const (
 	LLMGuardEndpointScanPrompt    = "/scan/prompt"
 )
 
+type ScannerConfig struct {
+	Name     string
+	Action   string
+	Entities []EntityConfig
+}
+
+type EntityConfig struct {
+	EntityType string
+	Action     string
+}
+
 type LLMGuardConfig struct {
 	ServiceName   string
 	ServicePort   int64
@@ -39,9 +50,6 @@ type LLMGuardConfig struct {
 	EndpointAnalyzePrompt string
 	EndpointScanPrompt    string
 
-	CheckRequest  bool
-	CheckResponse bool
-	Scope         string
 	DefaultAction string
 
 	RequestJsonPath  string
@@ -51,17 +59,24 @@ type LLMGuardConfig struct {
 	DenyMessage string
 	Timeout     uint32
 	Metrics     map[string]proxywasm.MetricCounter
+
+	ScannersInclude      []string
+	AnonymizeEntityTypes []string
+	ScannerActions       map[string]string
+	EntityActions        map[string]string
 }
 
 type AnalyzePromptRequest struct {
-	Prompt           string   `json:"prompt"`
-	ScannersSuppress []string `json:"scanners_suppress,omitempty"`
+	Prompt               string   `json:"prompt"`
+	ScannersInclude      []string `json:"scanners_include,omitempty"`
+	ShowDetails          bool     `json:"show_details,omitempty"`
+	AnonymizeEntityTypes []string `json:"anonymize_entity_types,omitempty"`
 }
 
 type AnalyzePromptResponse struct {
-	SanitizedPrompt string             `json:"sanitized_prompt"`
-	IsValid         bool               `json:"is_valid"`
-	Scanners        map[string]float64 `json:"scanners"`
+	SanitizedPrompt string                 `json:"sanitized_prompt"`
+	IsValid         bool                   `json:"is_valid"`
+	Scanners        map[string]interface{} `json:"scanners"`
 }
 
 type ScanPromptRequest struct {
@@ -97,15 +112,7 @@ func (c *LLMGuardConfig) Parse(json gjson.Result) error {
 		c.EndpointScanPrompt = LLMGuardEndpointScanPrompt
 	}
 
-	c.CheckRequest = json.Get("checkRequest").Bool()
-	c.CheckResponse = json.Get("checkResponse").Bool()
-
-	c.Scope = json.Get("scope").String()
-	if c.Scope == "" {
-		c.Scope = ScopeInput
-	}
-
-	c.DefaultAction = json.Get("defaultAction").String()
+	c.DefaultAction = strings.ToUpper(json.Get("defaultAction").String())
 	if c.DefaultAction == "" {
 		c.DefaultAction = ActionMask
 	}
@@ -135,6 +142,35 @@ func (c *LLMGuardConfig) Parse(json gjson.Result) error {
 		c.Timeout = uint32(obj.Int())
 	} else {
 		c.Timeout = DefaultTimeout
+	}
+
+	c.ScannerActions = make(map[string]string)
+	c.EntityActions = make(map[string]string)
+	if scanners := json.Get("scanners"); scanners.Exists() && scanners.IsArray() {
+		for _, scanner := range scanners.Array() {
+			name := scanner.Get("name").String()
+			action := strings.ToUpper(scanner.Get("action").String())
+			if name != "" {
+				c.ScannersInclude = append(c.ScannersInclude, name)
+				if action != "" {
+					c.ScannerActions[name] = action
+				}
+				if name == "Anonymize" {
+					if entities := scanner.Get("entities"); entities.Exists() && entities.IsArray() {
+						for _, entity := range entities.Array() {
+							eType := entity.Get("entityType").String()
+							eAction := strings.ToUpper(entity.Get("action").String())
+							if eType != "" {
+								c.AnonymizeEntityTypes = append(c.AnonymizeEntityTypes, eType)
+								if eAction != "" {
+									c.EntityActions[eType] = eAction
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 
 	c.ServiceClient = wrapper.NewClusterClient(wrapper.FQDNCluster{
